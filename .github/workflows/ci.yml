@@ -26,13 +26,16 @@ jobs:
       - name: Cross-check digest constants in plugin sources
         run: |
           set -euo pipefail
-          grep -q '0ef04d1a72ad9aa31a00e212246e8fb6765ed1948b74c654af8ce5e99b579216' index.js
-          grep -q 'dsh-bwrap-redirect-v6-0ef04d1a72ad' index.js
-          grep -q 'dsh-bwrap-redirect-v6-0ef04d1a72ad' cordis.patch.yml
-          echo "digest constants consistent across index.js and cordis.patch.yml"
+          grep -q '0ef04d1a72ad9aa31a00e212246e8fb6765ed1948b74c654af8ce5e99b579216' lib/peers.js
+          grep -q 'dsh-bwrap-redirect-v6-0ef04d1a72ad' lib/peers.js
+          ! grep -q 'runnerCommand' cordis.patch.yml
+          echo "digest constants consistent; patch carries no runner path"
 
-      - name: Syntax-check the Host plugin
-        run: node --check index.js
+      - name: Syntax-check the plugin sources
+        run: |
+          set -euo pipefail
+          node --check index.js
+          for f in lib/*.js tests/*.mjs; do node --check "$f"; done
 
       - name: Parse cordis.patch.yml (tolerating the loader's !!js tag)
         run: |
@@ -47,17 +50,48 @@ jobs:
           with open("cordis.patch.yml") as f:
               doc = yaml.load(f, Loader=yaml.SafeLoader)
           assert isinstance(doc, list) and len(doc) == 2, "patch must hold two rows"
-          assert doc[0]["insert"][0]["name"] == "dsh-sandbox-cache-redirect"
-          assert doc[1]["id"] == "sandbox"
-          config = doc[1]["config"]
-          assert config["runnerFailureSignatures"] == ["dsh-bwrap-redirect:", "bwrap:"]
-          assert config["probeTimeoutMs"] == 5000
-          assert "dsh-bwrap-redirect-v6-0ef04d1a72ad" in config["runnerCommand"]
-          print("patch parses and matches expectations")
+          native, inserted = doc
+          assert native["id"] == "sandbox"
+          assert native["name"] == "@deepseek-ai/dsh-sandbox-local"
+          assert native["disabled"] is True
+          assert "sandboxCacheRedirectGuardReady" in native["inject"]
+          assert inserted["insert"][0]["id"] == "sandbox-cache-redirect"
+          assert inserted["insert"][0]["name"] == "dsh-sandbox-cache-redirect"
+          assert inserted["insert"][0]["config"] == {}
+          print("patch parses and matches the guarded-provider structure")
           PY
 
       - name: Pack dry-run (shippable file list)
         run: npm pack --dry-run
+
+  provider-tests:
+    name: Guarded provider test suite (Node 24)
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:44
+    steps:
+      - name: Install toolchain
+        run: dnf install -y -q git bubblewrap python3
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install the pinned DSH runtime (host peers anchor)
+        run: npm install --global @deepseek-ai/dsh@0.2.1-alpha.2
+
+      - uses: actions/checkout@v4
+
+      - name: Show environment identities
+        run: |
+          grep -E '^(NAME|VERSION)=' /etc/os-release
+          rpm -q bubblewrap python3
+          /usr/bin/python3 --version
+          node --version
+          dsh --version
+
+      - name: Run the guarded provider tests
+        run: node --test tests/*.test.mjs
 
   smoke:
     name: Runner smoke suite (Fedora 44, bwrap)

@@ -1,6 +1,6 @@
 {
   "name": "dsh-sandbox-cache-redirect",
-  "version": "6.2.0",
+  "version": "6.2.1",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -16,7 +16,7 @@
     "uv",
     "cache"
   ],
-  "description": "Redirects uv/pip/npm/Go cache and runtime directories into the workspace for sandboxed commands, via a pinned bwrap runner (V6.2 scheme).",
+  "description": "Guarded sandbox provider that pins a digest-verified bwrap runner, redirecting uv/pip/npm/Go caches and runtimes into the workspace for sandboxed commands (V6.2 scheme). Linux only.",
   "exports": {
     ".": "./index.js",
     "./locale/*.json": "./locale/*.json",
@@ -24,14 +24,36 @@
   },
   "files": [
     "index.js",
+    "lib/*.js",
     "cordis.patch.yml",
     "runner/dsh-bwrap-redirect",
     "tools/*.py",
+    "tests/*.mjs",
     "locale/*.json",
     "icon.svg",
     "README.md",
     "README.en.md"
   ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.5-alpha.1",
+    "@deepseek-ai/dsh-sandbox": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-sandbox-local": "0.2.1-alpha.2",
+    "@deepseek-ai/schemastery": "~3.18.5-alpha.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-sandbox": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-sandbox-local": {
+      "optional": true
+    },
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"

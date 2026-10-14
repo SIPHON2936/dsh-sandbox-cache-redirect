@@ -28,20 +28,19 @@ DSH bash executor → sandbox.confine(argv, policy)
   → /usr/bin/bwrap (caches/runtimes land in the workspace)
 ```
 
-The bundle does two things:
+The bundle does two things (a **guarded provider** structure since 6.2.1):
 
-1. **cordis.patch.yml** replaces the `sandbox` entry's (`@deepseek-ai/dsh-sandbox-local`) config wholesale:
-   `runnerCommand` points at the trusted runner, `runnerFailureSignatures` registers its failure dialect, `probeTimeoutMs` 5000.
-2. **index.js (Host plugin)** installs and verifies the runner at activation:
-   - verifies the bundled runner's SHA-256 (must equal `0ef04d1a…579216`);
-   - creates `$HOME/.local/libexec/dsh/dsh-bwrap-redirect-v6-0ef04d1a72ad` exclusively, mode 0500, `O_NOFOLLOW`;
-   - reuses an existing file only if it is a same-digest, user-owned regular file without group/other write permission — it is **never overwritten**;
-   - re-verifies the installed file's digest and permission bits, and audits the parent chain (every component owned by root or the current user, never group/world-writable);
-   - preflight gates: Linux only; `/usr/bin/python3` and `/usr/bin/bwrap` executable; bwrap ≥ 0.12.0 (the CVE-2026-87766 fix floor).
+1. **cordis.patch.yml** disables the native `sandbox` entry and attaches a readiness dependency to it (so a higher patch layer that re-enables it still cannot activate while the guarded provider is unhealthy); it then inserts this package's guarded entry.
+2. **The guarded provider (index.js + lib/)** subclasses the Host's own `LocalSandboxProvider` and bakes "verify before registering, re-verify on every call" into its construction and call paths:
+   - **Before registering** (prepare): platform/UID gates; composition checks (native row disabled with its inject blocker in place, bash row intact); dual-path identity audits of python3/bwrap (**including the setuid bit**, before any version query); bwrap ≥ 0.12.0 (the CVE-2026-87766 fix floor) and `python3 -IS` flags; the bundled runner's digest must equal `0ef04d1a…579216`; the install chain is **audited level by level before anything is created** (symlinks, group/other-writable or untrusted-owned directories refused); the runner is **atomically published** via staging + exclusive `link()` (an existing file is reused only if it is a same-digest, user-owned, mode-0500, single-link regular file — **never overwritten**).
+   - **On every confine**: re-checks the runner's inode/bytes, python/bwrap identity, and instance liveness; validates the call's mode and the actual session root (refusing `/`, all of HOME, colon-bearing paths, and any workspace layout overlapping the **protected sets** — runner, DSH_HOME, the DSH installation, this plugin package, the Python stdlib, and operator-added roots); after delegating argv generation to the native method, it asserts byte-for-byte that the result is exactly "pinned runner + locked template + original payload".
+   - Every failure raises a structured `SandboxUnavailableError` — never returns the raw command, never swaps in a local executor, never retries with more privilege.
 
-If any check fails, the plugin throws during load; the sandbox then **fails closed** (commands never run unconfined) instead of silently degrading.
+If any stage fails, `ctx.sandbox` is never registered: the confined bash executor that requires it stays unavailable and **fails closed** instead of falling back to an uncertified runner.
 
 The runner itself only matches strings and execs: it creates, resolves, or cleans no cache directories on the host and adds no mounts; unknown bwrap profiles are rejected outright, never passed through as unsandboxed commands.
+
+The provider row's config is strict: only an optional positive-integer `probeTimeoutMs` and an optional absolute-directory array `additionalProtectedRoots` (which can only widen the protected sets) are accepted; `runnerCommand` and every other field is rejected — no configuration layer can point the runner elsewhere.
 
 ## The nine redirected directories
 
@@ -111,15 +110,16 @@ The smoke suite covers: nine-variable injection, a host-writable positive contro
 
 ## Upgrading
 
-When upgrading DSH/bwrap or replacing the runner: re-check the bwrap profile templates → update this package with a **new versioned file name** and digest (`RUNNER_SHA256` and `RUNNER_FILE_NAME` in `index.js`, the runnerCommand path in `cordis.patch.yml`, and the `runner/` source file) → re-run the smoke acceptance → `npm pack` and reinstall. Never overwrite a runner file that is in use.
+When upgrading DSH/bwrap or replacing the runner: re-check the bwrap profile templates → update this package with a **new versioned file name** and digest (`RUNNER_SHA256`, `RUNNER_FILE_NAME`, and `PINNED_VERSIONS` in `lib/peers.js`, plus the `runner/` source file) → re-run the test suite and smoke acceptance → `npm pack` and reinstall. Never overwrite a runner file that is in use.
 
-The runner strictly matches DSH's bwrap templates; if a DSH upgrade changes the templates, confined commands fail closed with `unrecognized bwrap profile` — follow the procedure above to re-validate.
+The runner strictly matches DSH's bwrap templates, and the plugin entry pins DSH and the sandbox-seam packages to `0.2.1-alpha.2`: after a DSH upgrade this plugin **refuses to load** (the bundle import fails, the native row stays disabled, confined commands fail closed) until the new version is re-validated through the procedure above.
 
 ## Supported scope
 
 - Platform: Linux only (tested on Fedora 44 WSL2 with bwrap 0.12.0, Python 3.14, uv 0.13, Go 1.26). macOS/Windows are unsupported — their sandboxes use their own backends, and this package refuses to load there.
-- DSH: the runner is strictly locked to 0.2.1-alpha.2's bwrap templates.
-- uv ≥ 0.7.0 is required (`UV_PYTHON_CACHE_DIR` was introduced in 0.7.0); Go is supported in module mode only.
+- DSH: strictly pinned to 0.2.1-alpha.2 (templates matched byte-for-byte by the runner, versions pinned at the plugin entry; any other version refuses to load).
+- uv ≥ 0.7.0 is required (`UV_PYTHON_CACHE_DIR` was introduced in 0.7.0); Go is supported in module mode only; workspace paths containing colons are refused.
+- Never use `/` or all of HOME as a workspace; protected trees (runner, DSH_HOME, the DSH installation, this plugin package, the Python stdlib) cannot host projects — checked on every confine call.
 
 ## License
 

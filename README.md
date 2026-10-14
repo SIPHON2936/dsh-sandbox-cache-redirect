@@ -27,20 +27,17 @@ DSH bash executor → sandbox.confine(argv, policy)
   → /usr/bin/bwrap(缓存/运行时落进工作区)
 ```
 
-本 bundle 做两件事:
+本 bundle 做两件事(6.2.1 起为**受检 provider** 结构):
 
-1. **cordis.patch.yml** 整体替换 sandbox 条目(`@deepseek-ai/dsh-sandbox-local`)的 config:
-   `runnerCommand` 指向受信 runner,`runnerFailureSignatures` 登记其故障方言,`probeTimeoutMs` 5000。
-2. **index.js(Host 插件)** 在激活时安装并核验 runner:
-   - 校验随包 runner 的 SHA-256(必须等于 `0ef04d1a…579216`);
-   - 排他创建 `$HOME/.local/libexec/dsh/dsh-bwrap-redirect-v6-0ef04d1a72ad`,mode 0500,`O_NOFOLLOW`;
-   - 已存在时仅复用同摘要、本人所有、无组/他人写权限的常规文件,**绝不覆盖**;
-   - 复核安装件摘要与权限位,审计父目录链(每级须 root 或本人所有、不可被组/他人写);
-   - 前置门槛:仅 Linux;`/usr/bin/python3`、`/usr/bin/bwrap` 可执行;bwrap ≥ 0.12.0(CVE-2026-87766 修复下限)。
+1. **cordis.patch.yml** 停用原生 sandbox 条目并为其附加就绪依赖(若更高配置层把它重新启用,缺少就绪服务会使其无法激活);再插入本包的受检条目。
+2. **受检 provider(index.js + lib/)** 继承 Host 的 `LocalSandboxProvider`,把"先校验、后注册、逐次复查"固化进构造与调用路径:
+   - **注册前**(prepare):平台/UID 门槛;组合树检查(原生行已停用且就绪依赖在位,bash 行完好);python3/bwrap 双路径身份审计(**含 setuid 位**,先于任何版本查询);bwrap ≥ 0.12.0(CVE-2026-87766 修复下限)与 `python3 -IS` 标志;随包 runner 摘要必须等于 `0ef04d1a…579216`;安装链**逐级先审后建**(拒绝 symlink、组/他人可写、非可信所有者);以**暂存+link 排他发布**原子安装 runner(已存在时仅复用同摘要、本人所有、mode 0500、单链接文件,**绝不覆盖**)。
+   - **每次 confine**:复查 runner inode/字节、python/bwrap 身份、实例存活;校验本次 mode 与实际会话 root(拒绝 `/`、整个 HOME、含冒号路径,以及与 runner/DSH_HOME/DSH 安装/插件包/Python 标准库等**保护集合**冲突的工作区布局);委托原生方法生成 argv 后,逐字断言其恰为"固定 runner + 锁定模板 + 原 payload"。
+   - 任何失败抛出结构化 `SandboxUnavailableError`——不返回原始命令、不切换本地 executor、不自动提权重试。
 
-任何一步失败,插件加载即抛错;此时 runnerCommand 指向的文件不可用,sandbox **失败关闭**(命令不会无沙箱运行),而不是悄悄退化。
+任一环节失败,`ctx.sandbox` 根本不会注册:依赖它的受限 bash 执行器不可用,**失败关闭**,而不是退回执行未认证的 runner。runner 本身只做字符串匹配与 exec:不在宿主创建、解析或清理任何缓存目录,不增加挂载;遇到未知 bwrap 模板直接拒绝,不透传为无沙箱命令。
 
-runner 本身只做字符串匹配与 exec:不在宿主创建、解析或清理任何缓存目录,不增加挂载;遇到未知 bwrap 模板直接拒绝,不透传为无沙箱命令。
+provider 行的 config 是严格的:仅接受可选正整数 `probeTimeoutMs` 与可选绝对目录数组 `additionalProtectedRoots`(只能扩大保护集合);`runnerCommand` 等字段一律拒绝——任何配置层都不能把 runner 指向别处。
 
 ## 注入的九个目录
 
@@ -109,15 +106,16 @@ smoke 覆盖:九变量注入、宿主可写对照、明确的 EROFS、工作区�
 
 ## 升级
 
-升级 DSH/bwrap 或更换 runner 时:重新核对 bwrap profile 模板 → 用**新的版本化文件名**与摘要更新本包(`index.js` 的 `RUNNER_SHA256`、`RUNNER_FILE_NAME`,`cordis.patch.yml` 的 runnerCommand 路径,以及 `runner/` 源文件)→ 重跑 smoke 验收 → 重新 `npm pack` 并安装。不要覆盖正在使用的 runner 文件。
+升级 DSH/bwrap 或更换 runner 时:重新核对 bwrap profile 模板 → 用**新的版本化文件名**与摘要更新本包(`lib/peers.js` 的 `RUNNER_SHA256`、`RUNNER_FILE_NAME`、`PINNED_VERSIONS`,以及 `runner/` 源文件)→ 重跑测试与 smoke 验收 → 重新 `npm pack` 并安装。不要覆盖正在使用的 runner 文件。
 
-runner 对 DSH 的 bwrap 模板做严格匹配;DSH 升级导致模板变化时,受限命令会失败关闭并报 `unrecognized bwrap profile`,此时按上述流程重验。
+runner 对 DSH 的 bwrap 模板做严格匹配,插件入口也把 DSH/sandbox 相关包版本钉死在 `0.2.1-alpha.2`:DSH 升级后本插件会**拒绝加载**(bundle 导入即失败,原生行保持停用,受限命令失败关闭),按上述流程重验后再放行新版。
 
 ## 支持范围
 
 - 平台:仅 Linux(已在 Fedora 44 WSL2 实测:bwrap 0.12.0、Python 3.14、uv 0.13、Go 1.26)。macOS/Windows 不在支持范围——这两个平台的 sandbox 使用各自后端,本包会直接拒绝加载。
-- DSH:0.2.1-alpha.2 的 bwrap 模板被 runner 严格锁定。
-- uv 需 ≥ 0.7.0(`UV_PYTHON_CACHE_DIR` 自该版本引入);Go 限 module 模式。
+- DSH:严格锁定 0.2.1-alpha.2(bwrap 模板由 runner 逐字匹配,版本由插件入口钉死;其他版本一律拒绝加载)。
+- uv 需 ≥ 0.7.0(`UV_PYTHON_CACHE_DIR` 自该版本引入);Go 限 module 模式;工作区路径不接受冒号。
+- 不把整个 HOME 或 `/` 当作工作区;runner、DSH_HOME、DSH 安装、插件包、Python 标准库等保护树内不能开项目(每次 confine 逐次检查)。
 
 ## 许可证
 

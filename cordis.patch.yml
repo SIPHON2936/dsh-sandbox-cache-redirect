@@ -1,21 +1,23 @@
-# dsh-sandbox-cache-redirect — V6.2 sandbox cache/runtime redirection.
+# dsh-sandbox-cache-redirect — V6.2 sandbox cache/runtime redirection,
+# guarded-provider form.
 #
-# Row 1 mounts the installer plugin (index.js): at activation it verifies the
-# bundled runner's pinned SHA-256 and installs it to the trusted versioned
-# location with mode 0500, refusing to overwrite differing content.
+# Row 1 retires the native sandbox provider inside this composition: it is
+# disabled, and it additionally requires the guard-ready service, so a higher
+# patch layer that re-enables it still cannot activate while the guarded
+# provider is unhealthy (fail closed instead of running an uncertified
+# runner). The `name` field only asserts the existing plugin name.
 #
-# Row 2 retargets the sandbox provider at that runner. `config` replaces the
-# row's config wholesale (never deep-merged), so all three fields are stated.
-# The !!js expression is evaluated by the Loader in the Host process and must
-# stay byte-identical in effect to runnerTargetPath() in index.js.
+# Row 2 inserts the guarded provider. Its class verifies everything (runner
+# digest, install chain, binaries, composition) BEFORE registering
+# ctx.sandbox, then re-verifies on every confined call. Row config is strict:
+# only optional probeTimeoutMs / additionalProtectedRoots are accepted; the
+# runner command is fixed inside the provider and is not configurable.
+- id: sandbox
+  name: '@deepseek-ai/dsh-sandbox-local'
+  disabled: true
+  inject:
+    sandboxCacheRedirectGuardReady: {}
 - insert:
     - id: sandbox-cache-redirect
       name: dsh-sandbox-cache-redirect
-- id: sandbox
-  name: '@deepseek-ai/dsh-sandbox-local'
-  config:
-    runnerCommand: !!js "['/usr/bin/python3', '-IS', process.env.HOME + '/.local/libexec/dsh/dsh-bwrap-redirect-v6-0ef04d1a72ad']"
-    runnerFailureSignatures:
-      - 'dsh-bwrap-redirect:'
-      - 'bwrap:'
-    probeTimeoutMs: 5000
+      config: {}
