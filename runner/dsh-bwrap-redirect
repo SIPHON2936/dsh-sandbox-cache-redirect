@@ -1,0 +1,79 @@
+#!/usr/bin/python3 -IS
+"""DSH v6 runner: strict bwrap profiles; workspace-local caches and runtimes.
+
+No workspace/host-cache filesystem operations are performed by this wrapper.
+Install outside every writable workspace. Requires a trusted launch environment.
+"""
+import os
+import sys
+
+REAL_BWRAP = "/usr/bin/bwrap"
+PROFILE_BASE = [
+    "--ro-bind", "/", "/",
+    "--dev", "/dev",
+    "--unshare-pid",
+    "--proc", "/proc",
+    "--die-with-parent",
+]
+PROFILE_WS_MID = ["--tmpfs", "/tmp"]
+
+# Persistent runtime data is deliberately separate from disposable caches.
+# No credential/configuration directories and no PATH/HOME/XDG rewrites.
+WORKSPACE_ENVS = {
+    "UV_CACHE_DIR": ".dsh-cache/uv",
+    "PIP_CACHE_DIR": ".dsh-cache/pip",
+    "npm_config_cache": ".dsh-cache/npm",
+    "GOCACHE": ".dsh-cache/go-build",
+    "UV_PYTHON_CACHE_DIR": ".dsh-cache/uv-python",
+    "UV_PYTHON_INSTALL_DIR": ".dsh-state/uv/python",
+    "UV_PYTHON_BIN_DIR": ".dsh-state/uv/bin",
+    "GOMODCACHE": ".dsh-cache/go-mod",
+    # Go's sumdb latest checkpoint is under GOPATH/pkg/sumdb, even when
+    # GOMODCACHE is set. This new project-local GOPATH is never put on PATH.
+    "GOPATH": ".dsh-state/go",
+}
+
+
+def fail(msg):
+    print(f"dsh-bwrap-redirect: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def match_profile(argv):
+    n = len(PROFILE_BASE)
+    if argv[:n] != PROFILE_BASE:
+        fail("unrecognized bwrap profile: base mismatch (dsh upgraded? re-run acceptance)")
+    rest = argv[n:]
+    if rest[:1] == ["--"]:
+        return "read-only", None, n
+    if (len(rest) >= 6 and rest[:2] == PROFILE_WS_MID
+            and rest[2] == "--bind" and rest[3] == rest[4]
+            and os.path.isabs(rest[3]) and rest[5] == "--"):
+        ws = rest[3].rstrip("/") or "/"
+        if ws == "/":
+            fail("refusing workspace '/'")
+        return "workspace-write", ws, n + 5
+    fail("unrecognized bwrap profile: tail mismatch (dsh upgraded? re-run acceptance)")
+
+
+def main(argv):
+    mode, ws, sep = match_profile(argv)
+    profile, command = argv[:sep], argv[sep:]
+    if len(command) < 2:
+        fail("malformed bwrap argv: empty command")
+    inject = []
+    if mode == "workspace-write":
+        for var, rel in WORKSPACE_ENVS.items():
+            folded = var.casefold()
+            for name in os.environ:
+                if name != var and name.casefold() == folded:
+                    inject += ["--unsetenv", name]
+            inject += ["--setenv", var, f"{ws}/{rel}"]
+    try:
+        os.execv(REAL_BWRAP, [REAL_BWRAP, *profile, *inject, *command])
+    except OSError as exc:
+        fail(f"cannot exec {REAL_BWRAP}: {exc.strerror or exc}")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

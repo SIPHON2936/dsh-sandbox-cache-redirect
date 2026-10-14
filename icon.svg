@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="shield" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3b82f6"/>
+      <stop offset="1" stop-color="#1d4ed8"/>
+    </linearGradient>
+  </defs>
+  <!-- shield: the sandbox boundary -->
+  <path d="M32 4 L54 11 V30 C54 44 45 54 32 59 C19 54 10 44 10 30 V11 Z"
+        fill="url(#shield)" stroke="#172554" stroke-width="2"/>
+  <!-- folder: the workspace -->
+  <path d="M19 27 h11 l3 4 h12 v14 H19 Z" fill="#dbeafe" stroke="#172554" stroke-width="2" stroke-linejoin="round"/>
+  <!-- redirect arrow: cache traffic bent into the workspace -->
+  <path d="M32 14 v8 a6 6 0 0 1 -6 6 h-3" fill="none" stroke="#fbbf24" stroke-width="3" stroke-linecap="round"/>
+  <path d="M20 25 l7 3 -7 3 z" fill="#fbbf24"/>
+</svg>

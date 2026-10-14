@@ -1,0 +1,13 @@
+# --- V6.2 沙箱重定向产物(手册 §9.3 要求排除)---
+# workspace-write 受限命令的缓存与运行时落点;可能含私有包、源码和日志
+.dsh-cache/
+.dsh-state/
+
+# --- Node / 打包产物 ---
+node_modules/
+*.tgz
+
+# --- 日志与系统杂项 ---
+*.log
+.DS_Store
+Thumbs.db

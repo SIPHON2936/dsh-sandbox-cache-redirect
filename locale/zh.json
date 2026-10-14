@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "沙箱缓存重定向",
+    "description": "安装并固定经摘要核验的 bwrap 前导 runner,让 workspace-write 受限命令把 uv/pip/npm/Go 的缓存与运行时写入项目内(.dsh-cache/.dsh-state),无需逐条命令加缓存前缀(V6.2 方案)。"
+  }
+}
