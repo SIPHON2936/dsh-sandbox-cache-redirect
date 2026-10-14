@@ -3,6 +3,15 @@
   "version": "6.2.0",
   "private": true,
   "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "sandbox",
+    "bwrap",
+    "uv",
+    "cache"
+  ],
   "description": "Redirects uv/pip/npm/Go cache and runtime directories into the workspace for sandboxed commands, via a pinned bwrap runner (V6.2 scheme).",
   "exports": {
     ".": "./index.js",
