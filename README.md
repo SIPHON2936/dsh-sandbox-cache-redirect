@@ -64,13 +64,25 @@ runner 本身只做字符串匹配与 exec:不在宿主创建、解析或清理�
 
 ## 安装与卸载
 
+### 方式一:dsh 命令一键安装(推荐)
+
+```bash
+dsh plugin --profile <你的 profile 名> add github:SIPHON2936/dsh-sandbox-cache-redirect
+```
+
+该命令把本仓库作为 git 依赖装入指定 profile 并注册 bundle;本包没有构建脚本,不需要 pnpm 的 allowBuilds 豁免。
+
+### 方式二:手动打包安装
+
 ```bash
 git clone https://github.com/SIPHON2936/dsh-sandbox-cache-redirect.git
 cd dsh-sandbox-cache-redirect
-npm pack           # 生成 dsh-sandbox-cache-redirect-6.2.0.tgz
+npm pack           # 生成 dsh-sandbox-cache-redirect-<版本>.tgz
 ```
 
-然后在 DSH 中用插件管理器把生成的 tgz 装入目标 profile(bundle 以拷贝方式安装,不链接源码目录)。
+然后在 DSH 插件管理器中安装生成的 tgz;也可以直接从 GitHub Release 页面下载已打好的包(由 tag 触发的 release 工作流自动产出)。
+
+两种方式都以拷贝形式落入 profile 的 node_modules,不链接源码目录。
 
 卸载/回退:
 

@@ -1,0 +1,79 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  static:
+    name: Static checks (digests, syntax, patch, pack)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify pinned digests of the runner and acceptance tools
+        run: |
+          set -euo pipefail
+          cat > /tmp/pinned.sha256 <<'EOF'
+          0ef04d1a72ad9aa31a00e212246e8fb6765ed1948b74c654af8ce5e99b579216  runner/dsh-bwrap-redirect
+          2f593b6875e272b5720cc434d73251c1bb3bd69b160fd59328f9493796e0362f  tools/smoke-v6.py
+          4c3420528a92c99e4a14057f77ef7353d0334e16f0b11c0e27fbea0f8607040e  tools/session-check-v6.py
+          9a2178d1660b63d7dcb812138c5e2709387cc8d1d898ba38e173f5f6980da9bb  tools/config-record.py
+          EOF
+          sha256sum --check /tmp/pinned.sha256
+
+      - name: Cross-check digest constants in plugin sources
+        run: |
+          set -euo pipefail
+          grep -q '0ef04d1a72ad9aa31a00e212246e8fb6765ed1948b74c654af8ce5e99b579216' index.js
+          grep -q 'dsh-bwrap-redirect-v6-0ef04d1a72ad' index.js
+          grep -q 'dsh-bwrap-redirect-v6-0ef04d1a72ad' cordis.patch.yml
+          echo "digest constants consistent across index.js and cordis.patch.yml"
+
+      - name: Syntax-check the Host plugin
+        run: node --check index.js
+
+      - name: Parse cordis.patch.yml (tolerating the loader's !!js tag)
+        run: |
+          set -euo pipefail
+          pip install --quiet pyyaml
+          python3 - <<'PY'
+          import yaml
+          yaml.SafeLoader.add_multi_constructor(
+              "tag:yaml.org,2002:js",
+              lambda loader, suffix, node: loader.construct_scalar(node),
+          )
+          with open("cordis.patch.yml") as f:
+              doc = yaml.load(f, Loader=yaml.SafeLoader)
+          assert isinstance(doc, list) and len(doc) == 2, "patch must hold two rows"
+          assert doc[0]["insert"][0]["name"] == "dsh-sandbox-cache-redirect"
+          assert doc[1]["id"] == "sandbox"
+          config = doc[1]["config"]
+          assert config["runnerFailureSignatures"] == ["dsh-bwrap-redirect:", "bwrap:"]
+          assert config["probeTimeoutMs"] == 5000
+          assert "dsh-bwrap-redirect-v6-0ef04d1a72ad" in config["runnerCommand"]
+          print("patch parses and matches expectations")
+          PY
+
+      - name: Pack dry-run (shippable file list)
+        run: npm pack --dry-run
+
+  smoke:
+    name: Runner smoke suite (Fedora 44, bwrap)
+    runs-on: ubuntu-latest
+    container: fedora:44
+    steps:
+      - name: Install toolchain
+        run: dnf install -y -q git bubblewrap python3
+
+      - uses: actions/checkout@v4
+
+      - name: Show environment identities
+        run: |
+          grep -E '^(NAME|VERSION)=' /etc/os-release
+          rpm -q bubblewrap python3
+          /usr/bin/python3 --version
+
+      - name: Run the standalone smoke suite
+        run: /usr/bin/python3 -IS tools/smoke-v6.py --wrapper "$GITHUB_WORKSPACE/runner/dsh-bwrap-redirect" --parent "$RUNNER_TEMP"

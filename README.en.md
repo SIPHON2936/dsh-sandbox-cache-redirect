@@ -65,13 +65,25 @@ Exclude `.dsh-cache/` and `.dsh-state/` in your project's `.gitignore`, `.docker
 
 ## Install and uninstall
 
+### Option 1: one-command install via dsh (recommended)
+
+```bash
+dsh plugin --profile <your-profile> add github:SIPHON2936/dsh-sandbox-cache-redirect
+```
+
+This installs the repository as a git dependency into the given profile and registers the bundle. The package ships no build scripts, so no pnpm allowBuilds exemption is needed.
+
+### Option 2: pack it yourself
+
 ```bash
 git clone https://github.com/SIPHON2936/dsh-sandbox-cache-redirect.git
 cd dsh-sandbox-cache-redirect
-npm pack           # produces dsh-sandbox-cache-redirect-6.2.0.tgz
+npm pack           # produces dsh-sandbox-cache-redirect-<version>.tgz
 ```
 
-Then install the tarball into your target DSH profile with the plugin manager (the bundle is copied into the profile, not linked to the source tree).
+Then install the tarball in the DSH plugin manager — or download a ready-made tarball from the GitHub Releases page (built automatically by the tag-triggered release workflow).
+
+Either way the bundle is copied into the profile's node_modules, never linked to the source tree.
 
 Uninstall / roll back:
 

@@ -1,0 +1,28 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  pack:
+    name: Pack tarball and attach to a GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify pinned runner digest before packing
+        run: |
+          echo "0ef04d1a72ad9aa31a00e212246e8fb6765ed1948b74c654af8ce5e99b579216  runner/dsh-bwrap-redirect" | sha256sum --check -
+
+      - name: npm pack and create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          npm pack
+          gh release create "$GITHUB_REF_NAME" ./*.tgz \
+            --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
