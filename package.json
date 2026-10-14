@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SIPHON2936/dsh-sandbox-cache-redirect.git"
+  },
   "keywords": [
     "deepseek-harness",
     "dsh-plugin",

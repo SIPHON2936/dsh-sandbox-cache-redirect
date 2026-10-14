@@ -43,8 +43,12 @@ DSH bash executor → sandbox.confine(argv, policy)
 ## 安装与卸载
 
 ```bash
+# 获取源码
+git clone https://github.com/SIPHON2936/dsh-sandbox-cache-redirect.git
+cd dsh-sandbox-cache-redirect
+
 # 打包(产物拷入 profile,不链接工作区,满足信任链要求)
-pnpm pack          # 生成 dsh-sandbox-cache-redirect-6.2.0.tgz
+npm pack           # 生成 dsh-sandbox-cache-redirect-6.2.0.tgz
 ```
 
 然后用插件管理器(`plugin_manager install_bundle`)把 tgz 装入目标 profile。
