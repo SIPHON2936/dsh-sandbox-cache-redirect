@@ -4,6 +4,9 @@
 
 一个 DeepSeek Harness(DSH)bundle 插件:安装后,`workspace-write` 受限的 bash 命令会自动把 uv/pip/npm/Go 的缓存与运行时目录写入当前项目,无需逐条命令添加缓存前缀,也不需要提示词层提醒。
 
+> [!IMPORTANT]
+> **本项目仅适用于 Linux。** 它依赖 Linux 专有的 bubblewrap(bwrap)沙箱与 user namespace;DSH 在 macOS 和 Windows 上使用完全不同的沙箱后端,本插件在这些平台会直接拒绝加载。已在 Fedora 44(WSL2)实测,详见文末「支持范围」。
+
 ## 为什么需要它
 
 DSH 的 workspace-write 模式把宿主根文件系统只读映射,只放开当前工作区和本次命令的 /tmp tmpfs。uv 等工具默认把缓存写入 `~/.cache`(位于只读区),命令因此失败:
@@ -67,7 +70,7 @@ runner 本身只做字符串匹配与 exec:不在宿主创建、解析或清理�
 ### 方式一:dsh 命令一键安装(推荐)
 
 ```bash
-dsh plugin --profile <你的 profile 名> add github:SIPHON2936/dsh-sandbox-cache-redirect
+dsh plugin --profile <你的 profile 名> add github:Siphon2673/dsh-sandbox-cache-redirect
 ```
 
 该命令把本仓库作为 git 依赖装入指定 profile 并注册 bundle;本包没有构建脚本,不需要 pnpm 的 allowBuilds 豁免。
@@ -75,7 +78,7 @@ dsh plugin --profile <你的 profile 名> add github:SIPHON2936/dsh-sandbox-cach
 ### 方式二:手动打包安装
 
 ```bash
-git clone https://github.com/SIPHON2936/dsh-sandbox-cache-redirect.git
+git clone https://github.com/Siphon2673/dsh-sandbox-cache-redirect.git
 cd dsh-sandbox-cache-redirect
 npm pack           # 生成 dsh-sandbox-cache-redirect-<版本>.tgz
 ```

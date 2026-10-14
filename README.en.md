@@ -4,6 +4,9 @@
 
 A bundle plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH). Once installed, bash commands confined under `workspace-write` automatically write their uv/pip/npm/Go caches and runtimes into the current project — no per-command cache prefixes, no prompt-level reminders.
 
+> [!IMPORTANT]
+> **Linux only.** This plugin relies on Linux-specific bubblewrap (bwrap) confinement and user namespaces. DSH on macOS and Windows uses entirely different sandbox backends, and this package refuses to load there. Tested on Fedora 44 (WSL2); see "Supported scope" at the bottom.
+
 ## Why
 
 DSH's workspace-write mode maps the host root filesystem read-only, leaving only the workspace and a per-command `/tmp` tmpfs writable. Tools like uv default to caches under `~/.cache` (read-only territory), so the command fails:
@@ -68,7 +71,7 @@ Exclude `.dsh-cache/` and `.dsh-state/` in your project's `.gitignore`, `.docker
 ### Option 1: one-command install via dsh (recommended)
 
 ```bash
-dsh plugin --profile <your-profile> add github:SIPHON2936/dsh-sandbox-cache-redirect
+dsh plugin --profile <your-profile> add github:Siphon2673/dsh-sandbox-cache-redirect
 ```
 
 This installs the repository as a git dependency into the given profile and registers the bundle. The package ships no build scripts, so no pnpm allowBuilds exemption is needed.
@@ -76,7 +79,7 @@ This installs the repository as a git dependency into the given profile and regi
 ### Option 2: pack it yourself
 
 ```bash
-git clone https://github.com/SIPHON2936/dsh-sandbox-cache-redirect.git
+git clone https://github.com/Siphon2673/dsh-sandbox-cache-redirect.git
 cd dsh-sandbox-cache-redirect
 npm pack           # produces dsh-sandbox-cache-redirect-<version>.tgz
 ```
