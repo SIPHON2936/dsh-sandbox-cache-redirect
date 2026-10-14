@@ -62,7 +62,12 @@ jobs:
   smoke:
     name: Runner smoke suite (Fedora 44, bwrap)
     runs-on: ubuntu-latest
-    container: fedora:44
+    # apparmor=unconfined: Ubuntu 24.04 hosts mediate unprivileged user
+    # namespaces via AppArmor, which blocks bwrap inside the container with
+    # "Creating new namespace failed: Operation not permitted".
+    container:
+      image: fedora:44
+      options: --security-opt apparmor=unconfined
     steps:
       - name: Install toolchain
         run: dnf install -y -q git bubblewrap python3
