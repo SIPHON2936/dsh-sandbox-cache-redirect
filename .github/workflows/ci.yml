@@ -62,12 +62,14 @@ jobs:
   smoke:
     name: Runner smoke suite (Fedora 44, bwrap)
     runs-on: ubuntu-latest
-    # apparmor=unconfined: Ubuntu 24.04 hosts mediate unprivileged user
-    # namespaces via AppArmor, which blocks bwrap inside the container with
-    # "Creating new namespace failed: Operation not permitted".
+    # bwrap needs unprivileged user namespaces, which the default container
+    # confinement denies on Ubuntu hosts ("Creating new namespace failed").
+    # --privileged is scoped to same-repo triggers: pull requests from forks
+    # only get the static job, so untrusted code never runs privileged.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     container:
       image: fedora:44
-      options: --security-opt apparmor=unconfined
+      options: --privileged
     steps:
       - name: Install toolchain
         run: dnf install -y -q git bubblewrap python3
