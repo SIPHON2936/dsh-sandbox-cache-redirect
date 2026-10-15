@@ -33,10 +33,15 @@ The bundle does two things (a **guarded provider** structure since 6.2.1):
 1. **cordis.patch.yml** disables the native `sandbox` entry and attaches a readiness dependency to it (so a higher patch layer that re-enables it still cannot activate while the guarded provider is unhealthy); it then inserts this package's guarded entry.
 2. **The guarded provider (index.js + lib/)** subclasses the Host's own `LocalSandboxProvider` and bakes "verify before registering, re-verify on every call" into its construction and call paths:
    - **Before registering** (prepare): platform/UID gates; composition checks (native row disabled with its inject blocker in place, bash row intact); dual-path identity audits of python3/bwrap (**including the setuid bit**, before any version query); bwrap ≥ 0.12.0 (the CVE-2026-87766 fix floor) and `python3 -IS` flags; the bundled runner's digest must equal `0ef04d1a…579216`; the install chain is **audited level by level before anything is created** (symlinks, group/other-writable or untrusted-owned directories refused); the runner is **atomically published** via staging + exclusive `link()` (an existing file is reused only if it is a same-digest, user-owned, mode-0500, single-link regular file — **never overwritten**).
-   - **On every confine**: re-checks the runner's inode/bytes, python/bwrap identity, and instance liveness; validates the call's mode and the actual session root (refusing `/`, all of HOME, colon-bearing paths, and any workspace layout overlapping the **protected sets** — runner, DSH_HOME, the DSH installation, this plugin package, the Python stdlib, and operator-added roots); after delegating argv generation to the native method, it asserts byte-for-byte that the result is exactly "pinned runner + locked template + original payload".
+   - **On every confine**: re-checks the runner's inode/bytes, python/bwrap identity, and instance liveness; **re-walks the symlink resolution chain of every DUAL protected tree** (DSH_HOME, the DSH installation, this plugin package, the Python stdlib) hop by hop and refuses on any drift from the activation snapshot (final realpath plus each link→target hop); validates the call's mode and the actual session root (refusing `/`, all of HOME, colon-bearing paths, and any workspace layout overlapping the **protected sets** — which include every intermediate symlink node of those resolution chains, so a workspace covering any hop is refused); after delegating argv generation to the native method, it asserts byte-for-byte that the result is exactly "pinned runner + locked template + original payload".
    - Every failure raises a structured `SandboxUnavailableError` — never returns the raw command, never swaps in a local executor, never retries with more privilege.
 
 If any stage fails, `ctx.sandbox` is never registered: the confined bash executor that requires it stays unavailable and **fails closed** instead of falling back to an uncertified runner.
+
+**Two failure classes, and where fail-closed holds:**
+
+- **Patch applied, activation failed** (binary audit, runner digest, composition mismatch, …): the native row is already disabled by this bundle's patch and carries the readiness dependency, so confined commands fail closed. This is what the plugin code itself can guarantee.
+- **The whole bundle is skipped** (corrupt bundle patch, incompatible DSH peer versions, missing package): this bundle's patch never applies and its code never runs, so the native row comes back as-is. To fail closed in that class too, the same "disable native + readiness dependency" row must live in the **per-profile user patch layer** (`~/.dsh/profiles/<profile>/cordis.patch.yml`), which DSH's composer loads independently of any bundle. The package ships a ready-made snippet at `patches/profile-fail-closed.patch.yml`; see the install steps. Without it, a peer incompatibility introduced by a DSH upgrade silently falls back to the native backend (bwrap confinement remains, but cache redirection and every audit above are gone) — that is not fail-closed.
 
 The runner itself only matches strings and execs: it creates, resolves, or cleans no cache directories on the host and adds no mounts; unknown bwrap profiles are rejected outright, never passed through as unsandboxed commands.
 
@@ -87,10 +92,23 @@ Then install the tarball in the DSH plugin manager — or download a ready-made 
 
 Either way the bundle is copied into the profile's node_modules, never linked to the source tree.
 
-Uninstall / roll back:
+### Step 3 (strongly recommended): apply the profile-layer fail-closed patch
 
-- Temporary: disable the bundle in the plugin manager — the sandbox falls back to the built-in bwrap backend; the runner file is kept.
-- Permanent: remove the bundle. Python interpreters under `.dsh-state` may still be referenced by project virtualenvs; use uv's own commands to retire them instead of deleting the directory.
+The bundle's own patch only applies when the whole bundle loads. To also cover "the whole bundle was skipped" (corrupt patch, peer incompatibility, missing package), append the shipped snippet to the user patch layer of every profile where the bundle is installed:
+
+```bash
+cat node_modules/dsh-sandbox-cache-redirect/patches/profile-fail-closed.patch.yml \
+  >> ~/.dsh/profiles/<profile>/cordis.patch.yml   # the snippet is a valid YAML entry
+```
+
+Restart the profile afterwards. With this in place, the native sandbox row stays disabled — and confined commands fail closed — even when the bundle is skipped entirely.
+
+Uninstall / roll back (verify per profile; do not assume "falls back to built-in bwrap" universally):
+
+- Temporary: disable the bundle in the plugin manager.
+  - Profiles with the fail-closed patch applied: the native row stays disabled and confined commands **fail closed** (no sandbox available) — that is the intended behavior.
+  - Profiles without it: the native row comes back enabled. Beware that the profile's user patch layer may override its `runnerCommand` (e.g. a leftover override from a historical V3 setup) — the fallback is then that override's runner, not the built-in default bwrap. Check `~/.dsh/profiles/<profile>/cordis.patch.yml` and remove stale overrides before rolling back.
+- Permanent: remove the bundle **and** the profile patch entry above; the native row then returns to built-in bwrap. Python interpreters under `.dsh-state` may still be referenced by project virtualenvs; use uv's own commands to retire them instead of deleting the directory. After any rollback, run one confined command to confirm the backend you actually got.
 
 ## Acceptance tools
 
@@ -112,7 +130,7 @@ The smoke suite covers: nine-variable injection, a host-writable positive contro
 
 When upgrading DSH/bwrap or replacing the runner: re-check the bwrap profile templates → update this package with a **new versioned file name** and digest (`RUNNER_SHA256`, `RUNNER_FILE_NAME`, and `PINNED_VERSIONS` in `lib/peers.js`, plus the `runner/` source file) → re-run the test suite and smoke acceptance → `npm pack` and reinstall. Never overwrite a runner file that is in use.
 
-The runner strictly matches DSH's bwrap templates, and the plugin entry pins DSH and the sandbox-seam packages to `0.2.1-alpha.2`: after a DSH upgrade this plugin **refuses to load** (the bundle import fails, the native row stays disabled, confined commands fail closed) until the new version is re-validated through the procedure above.
+The runner strictly matches DSH's bwrap templates, and the plugin entry pins DSH and the sandbox-seam packages to `0.2.1-alpha.2`: after a DSH upgrade this plugin **refuses to load**. With the profile-layer fail-closed patch applied, the native row stays disabled and confined commands fail closed; without it, the skipped bundle silently falls back to the native backend. Re-validate the new version through the procedure above before enabling it — do not keep running confined commands in that fallback state.
 
 ## Supported scope
 

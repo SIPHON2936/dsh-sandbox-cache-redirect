@@ -1,0 +1,26 @@
+# dsh-sandbox-cache-redirect — PROFILE-layer fail-closed patch.
+#
+# This file is NOT loaded by DSH from inside the bundle. It is a ready-made
+# snippet for the per-profile user patch layer:
+#
+#     ~/.dsh/profiles/<profile>/cordis.patch.yml
+#
+# Why it exists: this bundle's own cordis.patch.yml disables the native
+# sandbox row, but that patch only applies when the whole bundle loads. If the
+# bundle itself is skipped (corrupt patch, incompatible DSH peer versions,
+# missing package), the bundle's patch never runs and the native row would
+# silently come back without the guarded provider. The profile patch layer is
+# loaded independently of any bundle, so appending the row below keeps the
+# native sandbox row disabled — and blocked by the guard-ready inject — even
+# then: confined commands fail closed instead of falling back to an
+# uncertified configuration.
+#
+# Deployment: append this entry to the top-level array of
+# ~/.dsh/profiles/<profile>/cordis.patch.yml for every profile where the
+# bundle is installed, then restart the profile. Removal of the plugin must
+# also remove this entry; otherwise confined commands stay refused.
+- id: sandbox
+  name: '@deepseek-ai/dsh-sandbox-local'
+  disabled: true
+  inject:
+    sandboxCacheRedirectGuardReady: {}

@@ -13,6 +13,11 @@
  * chain policy rightly refuses world-writable parents). Destructive setups
  * only ever touch fixture copies. python3/bwrap identity checks run against
  * the real audited binaries, as in production.
+ *
+ * 6.3.0 additions: multi-hop symlink chains are fully walked and recorded
+ * (A01 — a workspace covering any intermediate hop is refused, and hop
+ * rewrites trip per-call re-verification), and early install failures leave
+ * no staging residue (A05).
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -25,7 +30,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { sanitizeConfig, resolveProbeTimeout } from "../lib/config.js";
 import { installOrReuseRunner, reverifyRunnerIdentity, sha256 } from "../lib/install.js";
 import { prepareState, checkCall, assertWrappedArgv, buildProvider } from "../lib/provider.js";
-import { auditInstallChain, auditTrustedExecutable, assertWorkspaceAllowed, buildProtectedSets, addProtectedTree, pathContains } from "../lib/trust.js";
+import { auditDualPath, auditInstallChain, auditTrustedExecutable, assertWorkspaceAllowed, buildProtectedSets, addProtectedTree, pathContains, reverifyDualPath } from "../lib/trust.js";
 
 const PACKAGE_DIR = path.dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 const RUNNER_SOURCE = fs.readFileSync(path.join(PACKAGE_DIR, "runner", "dsh-bwrap-redirect"));
@@ -337,6 +342,95 @@ test("per-call runner identity re-verification helper", (t) => {
 	reverifyRunnerIdentity(target, identity);
 	fs.chmodSync(target, 0o700);
 	assert.throws(() => reverifyRunnerIdentity(target, identity), /identity drifted/);
+});
+
+// --- 6.3.0 regression: A01 multi-hop symlink chain, A05 staging residue -----
+
+test("A01 auditDualPath records every hop; workspace covering a hop is refused", (t) => {
+	const home = makeFixtureHome(t);
+	// DSH_HOME entry -> in-workspace handoff link -> trusted real directory.
+	const ws = path.join(home, "ws");
+	const trusted = path.join(home, "trusted", "realDsh");
+	fs.mkdirSync(ws);
+	fs.mkdirSync(trusted, { recursive: true });
+	fs.rmSync(path.join(home, ".dsh"), { recursive: true });
+	fs.symlinkSync(path.join(ws, "handoff"), path.join(home, ".dsh"));
+	fs.symlinkSync(trusted, path.join(ws, "handoff"));
+	const tree = auditDualPath(path.join(home, ".dsh"), { finalKind: "directory" });
+	assert.equal(tree.resolved, trusted);
+	assert.deepEqual(
+		tree.hops,
+		[
+			{ link: path.join(home, ".dsh"), target: path.join(ws, "handoff") },
+			{ link: path.join(ws, "handoff"), target: trusted },
+		],
+		"every intermediate hop must be recorded",
+	);
+	const sets = buildProtectedSets();
+	addProtectedTree(sets, tree);
+	assert.throws(() => assertWorkspaceAllowed(ws, sets), /covers protected/);
+	// A workspace that cannot reach the hop stays legal (positive control).
+	assertWorkspaceAllowed(path.join(home, "projects", "demo"), sets);
+	// Drift: rewriting the hop must trip per-call re-verification.
+	fs.rmSync(path.join(ws, "handoff"));
+	fs.symlinkSync(path.join(ws, "replacement"), path.join(ws, "handoff"));
+	fs.mkdirSync(path.join(ws, "replacement"));
+	assert.throws(() => reverifyDualPath(tree), /changed since activation/);
+	// Legitimate single-hop symlink outside any workspace still passes.
+	const okHome = makeFixtureHome(t);
+	const realDsh = path.join(okHome, "real-dsh");
+	fs.mkdirSync(realDsh);
+	fs.rmSync(path.join(okHome, ".dsh"), { recursive: true });
+	fs.symlinkSync(realDsh, path.join(okHome, ".dsh"));
+	const okTree = auditDualPath(path.join(okHome, ".dsh"), { finalKind: "directory" });
+	reverifyDualPath(okTree); // must not throw
+});
+
+test("A01 end-to-end: hop rewrite between calls makes the next confine fail closed", async (t) => {
+	const { Context } = await import(pathToFileURL(require_resolveCordis()).href);
+	const home = makeFixtureHome(t);
+	const ws = path.join(home, "projects", "demo");
+	const trusted = path.join(home, "trusted", "realDsh");
+	fs.mkdirSync(ws, { recursive: true });
+	fs.mkdirSync(trusted, { recursive: true });
+	fs.rmSync(path.join(home, ".dsh"), { recursive: true });
+	fs.symlinkSync(path.join(ws, "handoff"), path.join(home, ".dsh"));
+	fs.symlinkSync(trusted, path.join(ws, "handoff"));
+	// The workspace itself covers the recorded hop, so workspace-write is
+	// already refused at the layout check…
+	const GuardedProvider = buildProvider(shared, { env: { HOME: home } });
+	const ctx = new Context();
+	ctx.provide("loader", makeCtx({ home }).loader);
+	ctx.provide("sandboxPolicy", makeCtx({ home }).sandboxPolicy);
+	ctx.provide("dshHomePath", makeCtx({ home }).dshHomePath);
+	const provider = new GuardedProvider(ctx, {});
+	await assert.rejects(
+		() => provider.confine(["true"], { mode: "workspace-write", workspaceRoot: ws }, undefined),
+		/covers protected|SANDBOX_UNAVAILABLE/,
+	);
+	// …and even a read-only call (no layout check) refuses once the hop moved.
+	fs.rmSync(path.join(ws, "handoff"));
+	fs.mkdirSync(path.join(home, "elsewhere"));
+	fs.symlinkSync(path.join(home, "elsewhere"), path.join(ws, "handoff"));
+	await assert.rejects(
+		() => provider.confine(["true"], { mode: "read-only", workspaceRoot: os.homedir() }, undefined),
+		/changed since activation|SANDBOX_UNAVAILABLE/,
+	);
+});
+
+test("A05 early install failure leaves no staging residue", (t) => {
+	const home = makeFixtureHome(t);
+	const dir = path.join(home, ".local", "libexec", "dsh");
+	fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+	// A wrong expected digest forces the read-back check to fail — one of the
+	// early failure points that previously orphaned the staging file.
+	assert.throws(
+		() => installOrReuseRunner({ sourceBytes: RUNNER_SOURCE, target: path.join(dir, RUNNER_FILE_NAME), expectedSha256: "0".repeat(64) }),
+		/read-back digest mismatch/,
+	);
+	const residue = fs.readdirSync(dir).filter((name) => name.includes("staging"));
+	assert.deepEqual(residue, [], `staging residue left behind: ${residue}`);
+	assert.equal(fs.existsSync(path.join(dir, RUNNER_FILE_NAME)), false, "target must not be published");
 });
 
 function require_resolveCordis() {

@@ -1,6 +1,6 @@
 {
   "name": "dsh-sandbox-cache-redirect",
-  "version": "6.2.3",
+  "version": "6.3.0",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -27,6 +27,7 @@
     "index.js",
     "lib/*.js",
     "cordis.patch.yml",
+    "patches/*.yml",
     "runner/dsh-bwrap-redirect",
     "tools/*.py",
     "tests/*.mjs",

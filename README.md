@@ -32,10 +32,15 @@ DSH bash executor → sandbox.confine(argv, policy)
 1. **cordis.patch.yml** 停用原生 sandbox 条目并为其附加就绪依赖(若更高配置层把它重新启用,缺少就绪服务会使其无法激活);再插入本包的受检条目。
 2. **受检 provider(index.js + lib/)** 继承 Host 的 `LocalSandboxProvider`,把"先校验、后注册、逐次复查"固化进构造与调用路径:
    - **注册前**(prepare):平台/UID 门槛;组合树检查(原生行已停用且就绪依赖在位,bash 行完好);python3/bwrap 双路径身份审计(**含 setuid 位**,先于任何版本查询);bwrap ≥ 0.12.0(CVE-2026-87766 修复下限)与 `python3 -IS` 标志;随包 runner 摘要必须等于 `0ef04d1a…579216`;安装链**逐级先审后建**(拒绝 symlink、组/他人可写、非可信所有者);以**暂存+link 排他发布**原子安装 runner(已存在时仅复用同摘要、本人所有、mode 0500、单链接文件,**绝不覆盖**)。
-   - **每次 confine**:复查 runner inode/字节、python/bwrap 身份、实例存活;校验本次 mode 与实际会话 root(拒绝 `/`、整个 HOME、含冒号路径,以及与 runner/DSH_HOME/DSH 安装/插件包/Python 标准库等**保护集合**冲突的工作区布局);委托原生方法生成 argv 后,逐字断言其恰为"固定 runner + 锁定模板 + 原 payload"。
+   - **每次 confine**:复查 runner inode/字节、python/bwrap 身份、实例存活;对 DSH_HOME、DSH 安装、插件包、Python 标准库等 **DUAL 保护树逐跳重走符号链接解析链**,与激活时记录的快照(最终 realpath + 每一跳 link→target)不一致即拒绝;校验本次 mode 与实际会话 root(拒绝 `/`、整个 HOME、含冒号路径,以及与保护集合冲突的工作区布局——保护集合包含解析链上的每个中间链接节点,工作区覆盖其中任一跳即拒绝);委托原生方法生成 argv 后,逐字断言其恰为"固定 runner + 锁定模板 + 原 payload"。
    - 任何失败抛出结构化 `SandboxUnavailableError`——不返回原始命令、不切换本地 executor、不自动提权重试。
 
 任一环节失败,`ctx.sandbox` 根本不会注册:依赖它的受限 bash 执行器不可用,**失败关闭**,而不是退回执行未认证的 runner。runner 本身只做字符串匹配与 exec:不在宿主创建、解析或清理任何缓存目录,不增加挂载;遇到未知 bwrap 模板直接拒绝,不透传为无沙箱命令。
+
+**失败关闭的边界要分清两类故障**:
+
+- **补丁已应用、插件激活失败**(二进制审计不过、runner 摘要不符、组合树被改动等):原生行已被本包补丁停用并挂着就绪依赖,受限命令失败关闭。这是插件代码自身能保证的范围。
+- **整个 bundle 被跳过**(bundle 补丁损坏、DSH peer 版本不兼容、包缺失):本包的补丁根本没有应用,插件代码也不会运行,原生行会恢复原样。要让这种情形同样失败关闭,必须把同一行"停用原生 + 就绪依赖"写进 **profile 用户补丁层**(`~/.dsh/profiles/<profile>/cordis.patch.yml`)——该层由 DSH 组合器独立加载,不依赖任何 bundle。随包提供现成片段 `patches/profile-fail-closed.patch.yml`,用法见安装步骤。未应用该片段时,DSH 升级导致的 peer 不兼容会让 bundle 被跳过并**静默回退到原生后端**(bwrap 隔离仍在,但缓存重定向与上述审计全部失效),这不是失败关闭。
 
 provider 行的 config 是严格的:仅接受可选正整数 `probeTimeoutMs` 与可选绝对目录数组 `additionalProtectedRoots`(只能扩大保护集合);`runnerCommand` 等字段一律拒绝——任何配置层都不能把 runner 指向别处。
 
@@ -84,10 +89,23 @@ npm pack           # 生成 dsh-sandbox-cache-redirect-<版本>.tgz
 
 两种方式都以拷贝形式落入 profile 的 node_modules,不链接源码目录。
 
-卸载/回退:
+### 第三步(强烈建议):应用 profile 层失败关闭补丁
 
-- 临时停用:在插件管理器中禁用本 bundle——sandbox 还原为内置 bwrap 后端,runner 文件保留;
-- 彻底移除:移除 bundle。`.dsh-state` 中的 Python 解释器可能被项目 venv 引用,请用 uv 自身命令处理,不要直接删除。
+bundle 自带的补丁只在 bundle 整体加载成功时才应用。为覆盖"整个 bundle 被跳过"的情形(补丁损坏、peer 不兼容、包缺失),把随包片段追加到每个已安装 profile 的用户补丁层末尾:
+
+```bash
+cat node_modules/dsh-sandbox-cache-redirect/patches/profile-fail-closed.patch.yml \
+  >> ~/.dsh/profiles/<profile 名>/cordis.patch.yml   # 片段本身也是合法 YAML 条目
+```
+
+(片段中的注释可保留;只有最后一个 `- id: sandbox` 条目生效所需的映射会被组合器读取。)重启 profile 后生效。应用后,即使 bundle 被整体跳过,原生 sandbox 行仍保持停用,受限命令失败关闭。
+
+卸载/回退(按 profile 核对实际结果,不要笼统假设"恢复内置 bwrap"):
+
+- **临时停用**:在插件管理器中禁用本 bundle。
+  - 已应用 profile 层失败关闭补丁的 profile:原生行保持停用,受限命令**失败关闭**(没有可用沙箱),这是预期行为;
+  - 未应用该补丁的 profile:原生行恢复启用。注意该行可能被该 profile 的用户补丁层覆盖过 `runnerCommand`(例如历史 V3 方案的覆盖)——此时回退到的是那个覆盖指定的 runner,而不是内置默认 bwrap。回退前请检查 `~/.dsh/profiles/<profile 名>/cordis.patch.yml`,先清理不再信任的旧覆盖。
+- **彻底移除**:移除 bundle,并删除上述 profile 补丁条目;原生行恢复为内置 bwrap。`.dsh-state` 中的 Python 解释器可能被项目 venv 引用,请用 uv 自身命令处理,不要直接删除。回退后请用一条受限命令实测确认后端符合预期。
 
 ## 验收工具
 
@@ -108,7 +126,7 @@ smoke 覆盖:九变量注入、宿主可写对照、明确的 EROFS、工作区�
 
 升级 DSH/bwrap 或更换 runner 时:重新核对 bwrap profile 模板 → 用**新的版本化文件名**与摘要更新本包(`lib/peers.js` 的 `RUNNER_SHA256`、`RUNNER_FILE_NAME`、`PINNED_VERSIONS`,以及 `runner/` 源文件)→ 重跑测试与 smoke 验收 → 重新 `npm pack` 并安装。不要覆盖正在使用的 runner 文件。
 
-runner 对 DSH 的 bwrap 模板做严格匹配,插件入口也把 DSH/sandbox 相关包版本钉死在 `0.2.1-alpha.2`:DSH 升级后本插件会**拒绝加载**(bundle 导入即失败,原生行保持停用,受限命令失败关闭),按上述流程重验后再放行新版。
+runner 对 DSH 的 bwrap 模板做严格匹配,插件入口也把 DSH/sandbox 相关包版本钉死在 `0.2.1-alpha.2`:DSH 升级后本插件会**拒绝加载**。此时若已应用 profile 层失败关闭补丁,原生行保持停用、受限命令失败关闭;若未应用,整个 bundle 被跳过会静默回退到原生后端——按上述流程重验后再放行新版,不要在这种回退状态下继续跑受限命令。
 
 ## 支持范围
 
