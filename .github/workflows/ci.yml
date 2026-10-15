@@ -78,7 +78,10 @@ jobs:
           node-version: 24
 
       - name: Install the pinned DSH runtime (host peers anchor)
-        run: npm install --global @deepseek-ai/dsh@0.2.1-alpha.2
+        # setup-node's prefix lives under the runner's 0777 /__t tool cache,
+        # which the trust audit rightly refuses; install into root-owned
+        # /usr/local instead so the DSH tree resolves through trusted dirs.
+        run: npm install --global --prefix /usr/local @deepseek-ai/dsh@0.2.1-alpha.2
 
       - uses: actions/checkout@v4
 
@@ -100,6 +103,7 @@ jobs:
         #    that tests run a copied package, never the linked checkout).
         env:
           HOME: /root
+          DSH_CLI: /usr/local/bin/dsh
         run: |
           set -euo pipefail
           rm -rf /root/pkg
