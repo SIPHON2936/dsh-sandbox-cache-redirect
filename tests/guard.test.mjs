@@ -46,6 +46,7 @@ function makeFixtureHome(t) {
 /** Minimal cordis-flavored ctx stub: real service table, stub loader tree, stub policy. */
 function makeCtx({ home, defaultMode = "workspace-write", defaultRoot, nativeRow } = {}) {
 	const services = new Map();
+	const warnings = [];
 	const native = nativeRow ?? {
 		id: "sandbox",
 		name: "@deepseek-ai/dsh-sandbox-local",
@@ -58,13 +59,14 @@ function makeCtx({ home, defaultMode = "workspace-write", defaultRoot, nativeRow
 	const ownEntry = { parent: { data: rows, tree: { store } } };
 	const ctx = {
 		fiber: { uid: 1 },
+		warnings,
 		loader: {
 			locate: () => "include:sandbox-cache-redirect",
 			resolve: () => ownEntry,
 		},
 		sandboxPolicy: { resolve: () => ({ mode: defaultMode, workspaceRoot: defaultRoot ?? path.join(home ?? os.homedir(), "projects", "demo") }) },
 		dshHomePath: (...segments) => path.join(os.homedir(), ".dsh", ...segments),
-		logger: { info() {}, warn() {} },
+		logger: { info() {}, warn: (...args) => warnings.push(args.join(" ")) },
 		provide: (name, value) => services.set(name, value),
 		get: (name) => services.get(name),
 		effect: (fn) => effects.push(fn),
@@ -265,6 +267,36 @@ test("provider: registers sandbox, confines read-only, rejects on revoke and unk
 	// Revocation: stale references fail closed.
 	provider.guardState.revoked = true;
 	await assert.rejects(() => provider.confine(["true"], { mode: "read-only", workspaceRoot: os.homedir() }), /revoked|SANDBOX_UNAVAILABLE/);
+});
+
+test("6.2.2 regression: launch-from-HOME warns at activation but never blocks startup", async (t) => {
+	const { Context } = await import(pathToFileURL(require_resolveCordis()).href);
+	const home = makeFixtureHome(t);
+	// Part 1: prepareState with the deployment default root == HOME (e.g. `dsh web`
+	// launched from ~) must succeed and emit a clear warning, not throw.
+	const stub = makeCtx({ home, defaultRoot: home });
+	const state = prepare(stub, {}, home);
+	assert.ok(stub.warnings.some((w) => /default workspace root is unsafe/.test(w)), `expected a default-root warning, got ${JSON.stringify(stub.warnings)}`);
+	// Part 2: a constructed provider over that state still enforces per call.
+	const GuardedProvider = buildProvider(shared, { env: { HOME: home } });
+	const ctx = new Context();
+	ctx.provide("loader", stub.loader);
+	ctx.provide("sandboxPolicy", stub.sandboxPolicy);
+	ctx.provide("dshHomePath", stub.dshHomePath);
+	const provider = new GuardedProvider(ctx, {});
+	assert.equal(provider.guardState.generation > state.generation, true, "provider prepared its own generation");
+	// A real session rooted at a project subdirectory confines normally.
+	const project = path.join(home, "projects", "demo");
+	const wrapped = await provider.confine(["true"], { mode: "workspace-write", workspaceRoot: project }, undefined);
+	assert.equal(wrapped.enforcement, "full");
+	// But a session actually rooted at HOME is still rejected per call, with guidance.
+	await assert.rejects(
+		() => provider.confine(["true"], { mode: "workspace-write", workspaceRoot: home }),
+		/covers protected[\s\S]*project subdirectory/,
+	);
+	// read-only over HOME stays allowed: nothing is injected or written.
+	const ro = await provider.confine(["true"], { mode: "read-only", workspaceRoot: home }, undefined);
+	assert.equal(ro.enforcement, "full");
 });
 
 test("G07 runner replaced after activation: next confine refuses", async (t) => {

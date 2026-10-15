@@ -120,6 +120,7 @@ The runner strictly matches DSH's bwrap templates, and the plugin entry pins DSH
 - DSH: strictly pinned to 0.2.1-alpha.2 (templates matched byte-for-byte by the runner, versions pinned at the plugin entry; any other version refuses to load).
 - uv ≥ 0.7.0 is required (`UV_PYTHON_CACHE_DIR` was introduced in 0.7.0); Go is supported in module mode only; workspace paths containing colons are refused.
 - Never use `/` or all of HOME as a workspace; protected trees (runner, DSH_HOME, the DSH installation, this plugin package, the Python stdlib) cannot host projects — checked on every confine call.
+- Launch-directory freedom: `dsh web` may be started from `~` or anywhere else; the launch cwd is only the deployment default root, and an unsafe one merely logs a warning without blocking startup. The hard per-call checks target each session's actual workspace root — a session rooted at HOME, `/`, or a protected tree has its confined commands refused one by one, with a hint to pick a project subdirectory. Read-only sessions are unaffected.
 
 ## License
 
