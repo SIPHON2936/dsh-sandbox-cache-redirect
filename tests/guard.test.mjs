@@ -39,6 +39,7 @@ const shared = await (await import("../lib/peers.js")).resolveHostPeers({ anchor
 
 function makeFixtureHome(t) {
 	const home = fs.mkdtempSync(path.join(os.homedir(), path.sep, "dsh-plugin-test-"));
+	fs.mkdirSync(path.join(home, ".dsh"), { mode: 0o700 }); // the fixture DSH_HOME, always present like a real one
 	t.after(() => fs.rmSync(home, { recursive: true, force: true }));
 	return home;
 }
@@ -65,7 +66,7 @@ function makeCtx({ home, defaultMode = "workspace-write", defaultRoot, nativeRow
 			resolve: () => ownEntry,
 		},
 		sandboxPolicy: { resolve: () => ({ mode: defaultMode, workspaceRoot: defaultRoot ?? path.join(home ?? os.homedir(), "projects", "demo") }) },
-		dshHomePath: (...segments) => path.join(os.homedir(), ".dsh", ...segments),
+		dshHomePath: (...segments) => path.join(home ?? os.homedir(), ".dsh", ...segments),
 		logger: { info() {}, warn: (...args) => warnings.push(args.join(" ")) },
 		provide: (name, value) => services.set(name, value),
 		get: (name) => services.get(name),
