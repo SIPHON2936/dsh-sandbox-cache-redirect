@@ -108,6 +108,7 @@ jobs:
           set -euo pipefail
           rm -rf /root/pkg
           cp -a "$GITHUB_WORKSPACE" /root/pkg
+          chown -R 0:0 /root/pkg
           cd /root/pkg
           node --test tests/*.test.mjs
 
