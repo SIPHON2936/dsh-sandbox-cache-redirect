@@ -90,14 +90,22 @@ jobs:
           node --version
           dsh --version
 
-      - name: Run the guarded provider tests
-        # GHA container jobs force HOME=/github/home (owned by the runner uid
-        # 1001 while the container runs as root), which the strict trust-chain
-        # audit rightly refuses. Point HOME at the root-owned /root instead —
-        # a test-harness accommodation, not a weakened production rule.
+      - name: Run the guarded provider tests from a trusted copy
+        # Two GHA container quirks are accommodated at the harness level, never
+        # by weakening the production audits:
+        #  - HOME is forced to /github/home (owned by runner uid 1001 while the
+        #    container runs as root): point HOME at root-owned /root.
+        #  - the checkout lives under 0777 /__w, which the trust-chain audit
+        #    rightly refuses: test a copy at /root/pkg (mirrors the plan's rule
+        #    that tests run a copied package, never the linked checkout).
         env:
           HOME: /root
-        run: node --test tests/*.test.mjs
+        run: |
+          set -euo pipefail
+          rm -rf /root/pkg
+          cp -a "$GITHUB_WORKSPACE" /root/pkg
+          cd /root/pkg
+          node --test tests/*.test.mjs
 
   smoke:
     name: Runner smoke suite (Fedora 44, bwrap)
