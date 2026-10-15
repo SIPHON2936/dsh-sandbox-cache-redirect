@@ -91,6 +91,12 @@ jobs:
           dsh --version
 
       - name: Run the guarded provider tests
+        # GHA container jobs force HOME=/github/home (owned by the runner uid
+        # 1001 while the container runs as root), which the strict trust-chain
+        # audit rightly refuses. Point HOME at the root-owned /root instead —
+        # a test-harness accommodation, not a weakened production rule.
+        env:
+          HOME: /root
         run: node --test tests/*.test.mjs
 
   smoke:
