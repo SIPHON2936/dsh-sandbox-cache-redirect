@@ -18,6 +18,10 @@
  * (A01 — a workspace covering any intermediate hop is refused, and hop
  * rewrites trip per-call re-verification), and early install failures leave
  * no staging residue (A05).
+ * 6.3.1 additions (T01/T02): kernel-faithful resolution — parent-directory
+ * links carrying suffixes, relative targets, and ".." combined with links
+ * resolve exactly like realpath(3), with a kernel cross-check that fails
+ * closed on any divergence.
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -431,6 +435,101 @@ test("A05 early install failure leaves no staging residue", (t) => {
 	const residue = fs.readdirSync(dir).filter((name) => name.includes("staging"));
 	assert.deepEqual(residue, [], `staging residue left behind: ${residue}`);
 	assert.equal(fs.existsSync(path.join(dir, RUNNER_FILE_NAME)), false, "target must not be published");
+});
+
+// --- 6.3.1 regression: T01/T02 kernel-faithful resolution (F630-01/F630-02) --
+
+test("T01 parent-directory symlink with suffix: single, relative, and multi-hop", (t) => {
+	const home = makeFixtureHome(t);
+	const base = path.join(home, "t01");
+	// Layout A: absolute parent link with a two-component suffix.
+	fs.mkdirSync(path.join(base, "a"), { recursive: true });
+	fs.mkdirSync(path.join(base, "b", "c", "d"), { recursive: true });
+	fs.symlinkSync(path.join(base, "b"), path.join(base, "a", "link"));
+	const treeA = auditDualPath(path.join(base, "a", "link", "c", "d"), { finalKind: "directory" });
+	assert.equal(treeA.resolved, path.join(base, "b", "c", "d"));
+	assert.equal(treeA.resolved, fs.realpathSync.native(path.join(base, "a", "link", "c", "d")));
+	assert.deepEqual(treeA.hops, [{ link: path.join(base, "a", "link"), target: path.join(base, "b") }]);
+	assert.ok(treeA.chainNodes.includes(path.join(base, "b")), "target-side traversed dir recorded");
+	// Layout B: relative parent link with suffix.
+	fs.mkdirSync(path.join(base, "r", "inner", "sub"), { recursive: true });
+	fs.symlinkSync(path.join("..", "r", "inner"), path.join(base, "a", "rel-link"));
+	const treeB = auditDualPath(path.join(base, "a", "rel-link", "sub"), { finalKind: "directory" });
+	assert.equal(treeB.resolved, path.join(base, "r", "inner", "sub"));
+	assert.deepEqual(treeB.hops, [{ link: path.join(base, "a", "rel-link"), target: path.join("..", "r", "inner") }]);
+	// Layout C: multi-hop where a middle hop still carries a suffix.
+	fs.mkdirSync(path.join(base, "m"), { recursive: true });
+	fs.symlinkSync(path.join(base, "m", "l2"), path.join(base, "a", "l1"));
+	fs.symlinkSync(path.join(base, "b"), path.join(base, "m", "l2"));
+	const treeC = auditDualPath(path.join(base, "a", "l1", "c"), { finalKind: "directory" });
+	assert.equal(treeC.resolved, path.join(base, "b", "c"));
+	assert.deepEqual(treeC.hops, [
+		{ link: path.join(base, "a", "l1"), target: path.join(base, "m", "l2") },
+		{ link: path.join(base, "m", "l2"), target: path.join(base, "b") },
+	]);
+	// A trailing ".." final component resolves to the true parent.
+	// NOTE: string concatenation, not path.join — join would normalize ".." away.
+	const treeD = auditDualPath(`${path.join(base, "a", "link")}/c/..`, { finalKind: "directory" });
+	assert.equal(treeD.resolved, path.join(base, "b"));
+});
+
+test("T02 link target with .. and a chained link: kernel semantics, protection holds", async (t) => {
+	const home = makeFixtureHome(t);
+	const base = path.join(home, "t02");
+	// p/link -> q/inner; nominal p/link/../c resolves (kernel) to q/c,
+	// NOT to the lexically normalized p/c. Both p/c and q/c exist so a
+	// wrong answer is detectable.
+	fs.mkdirSync(path.join(base, "p"), { recursive: true });
+	fs.mkdirSync(path.join(base, "q", "inner"), { recursive: true });
+	fs.mkdirSync(path.join(base, "q", "c"));
+	fs.mkdirSync(path.join(base, "p", "c"));
+	fs.symlinkSync(path.join(base, "q", "inner"), path.join(base, "p", "link"));
+	// NOTE: string concatenation, not path.join — join would normalize ".." away.
+	const nominal = `${path.join(base, "p", "link")}/../c`;
+	const tree = auditDualPath(nominal, { finalKind: "directory" });
+	assert.equal(tree.resolved, path.join(base, "q", "c"), "kernel semantics: .. applies after the link hop");
+	assert.equal(tree.resolved, fs.realpathSync.native(nominal), "must match kernel-faithful realpath(3)");
+	assert.ok(tree.chainNodes.includes(path.join(base, "q")), "the post-hop directory q is audited and recorded");
+	// Protection: a workspace covering q (the actually-accessed tree) is refused;
+	// a workspace over p is refused too (it could rewrite the link); an
+	// unrelated workspace stays legal.
+	const sets = buildProtectedSets();
+	addProtectedTree(sets, tree);
+	assert.throws(() => assertWorkspaceAllowed(path.join(base, "q"), sets), /covers protected|inside protected/);
+	assert.throws(() => assertWorkspaceAllowed(path.join(base, "p"), sets), /covers protected/);
+	assertWorkspaceAllowed(path.join(home, "projects", "demo"), sets);
+	// Chained combination: link whose raw target embeds .. AND another link.
+	const chained = path.join(base, "p", "chained");
+	fs.symlinkSync("../q/inner/../c", chained);
+	const tree2 = auditDualPath(chained, { finalKind: "directory" });
+	assert.equal(tree2.resolved, path.join(base, "q", "c"));
+	reverifyDualPath(tree2); // stable while untouched
+	// Provider level: a session workspace covering a resolution hop of DSH_HOME
+	// is refused BEFORE any argv is returned; read-only over a legit root works.
+	const { Context } = await import(pathToFileURL(require_resolveCordis()).href);
+	const home2 = makeFixtureHome(t);
+	const ws = path.join(home2, "ws");
+	fs.mkdirSync(ws);
+	fs.mkdirSync(path.join(home2, "trusted", "realDsh"), { recursive: true });
+	fs.rmSync(path.join(home2, ".dsh"), { recursive: true });
+	fs.symlinkSync(path.join("..", "trusted", "realDsh"), path.join(ws, "handoff")); // relative target with ..
+	fs.symlinkSync(path.join(ws, "handoff"), path.join(home2, ".dsh"));
+	const GuardedProvider = buildProvider(shared, { env: { HOME: home2 } });
+	const ctx = new Context();
+	ctx.provide("loader", makeCtx({ home: home2 }).loader);
+	ctx.provide("sandboxPolicy", makeCtx({ home: home2 }).sandboxPolicy);
+	ctx.provide("dshHomePath", makeCtx({ home: home2 }).dshHomePath);
+	const provider = new GuardedProvider(ctx, {});
+	assert.equal(provider.guardState.dualTrees.length >= 4, true);
+	const dshTree = provider.guardState.dualTrees.find((tree) => tree.nominal === path.join(home2, ".dsh"));
+	assert.equal(dshTree.resolved, path.join(home2, "trusted", "realDsh"));
+	await assert.rejects(
+		() => provider.confine(["true"], { mode: "workspace-write", workspaceRoot: ws }, undefined),
+		/covers protected|SANDBOX_UNAVAILABLE/,
+	);
+	// Positive control: a real project workspace still confines fine.
+	const wrapped = await provider.confine(["true"], { mode: "workspace-write", workspaceRoot: path.join(home2, "projects", "demo") }, undefined);
+	assert.equal(wrapped.enforcement, "full");
 });
 
 function require_resolveCordis() {

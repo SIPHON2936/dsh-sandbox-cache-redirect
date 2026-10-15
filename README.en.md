@@ -92,13 +92,26 @@ Then install the tarball in the DSH plugin manager — or download a ready-made 
 
 Either way the bundle is copied into the profile's node_modules, never linked to the source tree.
 
-### Step 3 (strongly recommended): apply the profile-layer fail-closed patch
+### Step 3 (REQUIRED for the full fail-closed guarantee): apply the profile-layer fail-closed patch
 
-The bundle's own patch only applies when the whole bundle loads. To also cover "the whole bundle was skipped" (corrupt patch, peer incompatibility, missing package), append the shipped snippet to the user patch layer of every profile where the bundle is installed:
+The bundle's own patch only applies when the whole bundle loads. To also cover "the whole bundle was skipped" (corrupt patch, peer incompatibility, missing package), the shipped snippet must be merged into the user patch layer of every profile where the bundle is installed. **Installing the bundle without this layer leaves a whole-bundle skip silently falling back to the native backend (see the two failure classes in "How it works") — if your deployment requires fail-closed there, this step is not optional.**
+
+How to merge (do NOT blindly append with `>>`: back up first, verify parsing after):
 
 ```bash
-cat node_modules/dsh-sandbox-cache-redirect/patches/profile-fail-closed.patch.yml \
-  >> ~/.dsh/profiles/<profile>/cordis.patch.yml   # the snippet is a valid YAML entry
+# 1) Back up the existing user patch layer
+cp ~/.dsh/profiles/<profile>/cordis.patch.yml ~/cordis.patch.yml.bak.$(date +%s)
+# 2) Read the shipped snippet (absolute path inside the profile's node_modules)
+cat ~/.dsh/profiles/<profile>/node_modules/dsh-sandbox-cache-redirect/patches/profile-fail-closed.patch.yml
+# 3) Merge the snippet's final "- id: sandbox" entry into that cordis.patch.yml's
+#    top-level array:
+#    - if the file is an empty list `[]`, replace it with a list of just this entry;
+#    - otherwise append the entry at the end of the array (matching indentation);
+#    - if an old runnerCommand override for the sandbox row exists, delete it first
+#      (it is a fallback source from historical setups).
+# 4) Verify the parse: the native row should be disabled with the
+#    sandboxCacheRedirectGuardReady requirement
+dsh --profile <profile> --dump-config | grep -A4 "id: sandbox"
 ```
 
 Restart the profile afterwards. With this in place, the native sandbox row stays disabled — and confined commands fail closed — even when the bundle is skipped entirely.

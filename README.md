@@ -89,16 +89,26 @@ npm pack           # 生成 dsh-sandbox-cache-redirect-<版本>.tgz
 
 两种方式都以拷贝形式落入 profile 的 node_modules,不链接源码目录。
 
-### 第三步(强烈建议):应用 profile 层失败关闭补丁
+### 第三步(要求完整失败关闭保证时为必需):应用 profile 层失败关闭补丁
 
-bundle 自带的补丁只在 bundle 整体加载成功时才应用。为覆盖"整个 bundle 被跳过"的情形(补丁损坏、peer 不兼容、包缺失),把随包片段追加到每个已安装 profile 的用户补丁层末尾:
+bundle 自带的补丁只在 bundle 整体加载成功时才应用。要覆盖"整个 bundle 被跳过"的情形(补丁损坏、peer 不兼容、包缺失),必须把随包片段合入每个已安装 profile 的用户补丁层。**仅安装 bundle 而不应用本层时,整包跳过会静默回退到原生后端(见「工作原理」末尾的两类故障区分)——若部署要求该情形同样失败关闭,此步骤不可省略。**
+
+合入方法(不要盲目 `>>` 追加:先备份,合入后做解析核验):
 
 ```bash
-cat node_modules/dsh-sandbox-cache-redirect/patches/profile-fail-closed.patch.yml \
-  >> ~/.dsh/profiles/<profile 名>/cordis.patch.yml   # 片段本身也是合法 YAML 条目
+# 1) 备份现有用户补丁层
+cp ~/.dsh/profiles/<profile 名>/cordis.patch.yml ~/cordis.patch.yml.bak.$(date +%s)
+# 2) 查看随包片段(位于该 profile 的 node_modules 下;请使用此绝对路径,不要依赖当前目录)
+cat ~/.dsh/profiles/<profile 名>/node_modules/dsh-sandbox-cache-redirect/patches/profile-fail-closed.patch.yml
+# 3) 把片段末尾的 "- id: sandbox" 条目合入上述 cordis.patch.yml 的顶层数组:
+#    - 文件内容为空列表 `[]` 时,替换为仅含该条目的数组;
+#    - 已有条目时,在数组末尾新增该条目(缩进与既有条目一致);
+#    - 若已存在对 sandbox 行的旧 runnerCommand 覆盖条目,先删除它(那是历史方案的回退源)。
+# 4) 解析核验:应看到原生行 disabled 且带 sandboxCacheRedirectGuardReady 依赖
+dsh --profile <profile 名> --dump-config | grep -A4 "id: sandbox"
 ```
 
-(片段中的注释可保留;只有最后一个 `- id: sandbox` 条目生效所需的映射会被组合器读取。)重启 profile 后生效。应用后,即使 bundle 被整体跳过,原生 sandbox 行仍保持停用,受限命令失败关闭。
+重启 profile 后生效。应用后,即使 bundle 被整体跳过,原生 sandbox 行仍保持停用,受限命令失败关闭。
 
 卸载/回退(按 profile 核对实际结果,不要笼统假设"恢复内置 bwrap"):
 

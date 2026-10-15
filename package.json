@@ -1,6 +1,6 @@
 {
   "name": "dsh-sandbox-cache-redirect",
-  "version": "6.3.0",
+  "version": "6.3.1",
   "private": true,
   "type": "module",
   "license": "MIT",
