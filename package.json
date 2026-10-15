@@ -1,6 +1,6 @@
 {
   "name": "dsh-sandbox-cache-redirect",
-  "version": "6.2.2",
+  "version": "6.2.3",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -23,6 +23,7 @@
     "./icon": "./icon.svg"
   },
   "files": [
+    "AGENTS.md",
     "index.js",
     "lib/*.js",
     "cordis.patch.yml",
