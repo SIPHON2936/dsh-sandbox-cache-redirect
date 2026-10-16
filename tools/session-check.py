@@ -32,16 +32,30 @@ DENIAL_ERRNOS = {errno.EROFS: "EROFS", errno.EACCES: "EACCES", errno.EPERM: "EPE
 
 def mount_evidence(root):
     try:
-        info = Path("/proc/self/mountinfo").read_text()
+        lines = Path("/proc/self/mountinfo").read_text().splitlines()
     except OSError:
         return {"available": False}
-    tmp_tmpfs = any(" /tmp tmpfs " in line for line in info.splitlines())
-    root_mount = any(
-        (" %s " % str(root)) in line or line.rstrip().endswith(" %s " % str(root))
-        for line in info.splitlines()
-    )
+    tmp_tmpfs = False
+    root_mount = False
+    root_rw = None
+    root_ro = None
+    for line in lines:
+        fields = line.split()
+        if "-" not in fields or len(fields) < 6:
+            continue
+        sep = fields.index("-")
+        mount_point, flags = fields[4], fields[5]
+        fstype = fields[sep + 1] if len(fields) > sep + 1 else ""
+        if mount_point == "/tmp" and fstype == "tmpfs" and flags.startswith("rw"):
+            tmp_tmpfs = True
+        if mount_point == str(root):
+            root_mount = True
+            root_rw = flags.startswith("rw")
+        if mount_point == "/":
+            root_ro = flags.startswith("ro")
     return {"available": True, "tmpfs_tmp": tmp_tmpfs, "workspace_mount": root_mount,
-            "bwrap_evidence": tmp_tmpfs and root_mount}
+            "workspace_rw": root_rw, "rootfs_ro": root_ro,
+            "bwrap_evidence": bool(tmp_tmpfs and root_mount)}
 
 
 def main():
