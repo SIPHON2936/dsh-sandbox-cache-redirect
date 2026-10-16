@@ -5,8 +5,8 @@
 ## 一、推送与合并纪律:main 永远保持绿
 
 1. **推送前门控**:任何推向 `main` 的提交,必须先通过所有能在本地运行的门禁——当前为 `node --check`(全部源码)和 `node --test tests/*.test.mjs`(全绿)。
-2. **生产代码变更**(`index.js`、`lib/`、`runner/`、`tools/`、`cordis.patch.yml`、`package.json` 的实质性内容)除上述外,还必须先在 headless profile 完成一次真实会话验收(`session-check-v6.py` 输出 `DSH-SESSION-PASS` + 宿主侧核对 PASS),通过后才允许推送。
-3. **只能在 GitHub 上验证的改动**(Actions 工作流、runner 环境适配等)不得直接推 main:开分支 → 提 PR(利用 `pull_request` 触发 CI)→ CI 全绿后合并。"推上去看 CI 结果"式迭代只允许发生在分支上。
+2. **生产代码变更**(`index.js`、`lib/`、`tools/`、`cordis.patch.yml`、`package.json` 的实质性内容)除上述外,还必须先在 headless profile 完成一次真实会话验收(`tools/session-check.py` 输出 `DSH-SESSION-PASS` + 宿主侧核对 PASS),通过后才允许推送。
+3. **只能在 GitHub 上验证的改动**(Actions 工作流、环境适配等)不得直接推 main:开分支 → 提 PR(利用 `pull_request` 触发 CI)→ CI 全绿后合并。"推上去看 CI 结果"式迭代只允许发生在分支上。
 4. 严禁把预期 CI 会红的状态推上 main;main 上的每一个提交都应是可发布候选。
 5. 推送前 `git status` 确认工作树干净、本次推送只含预期文件;推送后核对远端 CI 结论并留档。
 
@@ -19,9 +19,9 @@
 
 ## 三、安全边界不可协商项(本项目特有)
 
-10. `runner/` 与 `tools/` 下四个交付文件的 SHA-256 钉死在 CI 与代码中;任何变更必须伴随新版本化文件名与全套重验,不允许"顺手改一点"。
-11. 不为通过 CI/测试而放宽生产审计规则(属主、权限位、symlink、setuid、保护集合);环境差异只允许改测试夹具与 CI 配置。
-12. 失败关闭是合同:任何"先跑起来再说"的降级(跳过校验、放宽模板匹配、静默回退内置后端)都视为缺陷,不得合入。
+10. `tools/` 下交付文件(当前为 `session-check.py` 与 `bundle-selection.mjs`)的 SHA-256 钉死在 CI 中;任何变更必须伴随完整重验,不允许"顺手改一点"。(V6 时代的 `runner/` 四文件钉死仅保留在历史 tag,不以改写冒充原版。)
+11. 不为通过 CI/测试而放宽生产有效规则(布局保护集合、九变量注入、失败关闭与透传合同);环境差异只允许改测试夹具与 CI 配置。
+12. 原生隔离不可旁路是合同:任何"先跑起来再说"的降级(跳过校验、放宽结构契约、静默回退无沙箱执行)都视为缺陷,不得合入。主动停用或整包跳过后恢复原生 provider 是 V7 的设计行为而非缺陷;Landlock 降级必须明示(按实例告警),不得宣称缓存重定向已启用。
 
 ## 四、证据留档
 

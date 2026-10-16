@@ -1,151 +1,120 @@
-# dsh-sandbox-cache-redirect(沙箱缓存重定向插件)
+# dsh-sandbox-cache-redirect
 
 中文 | [English](README.en.md)
 
-一个 DeepSeek Harness(DSH)bundle 插件:安装后,`workspace-write` 受限的 bash 命令会自动把 uv/pip/npm/Go 的缓存与运行时目录写入当前项目,无需逐条命令添加缓存前缀,也不需要提示词层提醒。
+DSH（DeepSeek Harness）沙箱缓存重定向插件（V7 可插拔方案，Linux）。
 
-> [!IMPORTANT]
-> **本项目仅适用于 Linux。** 它依赖 Linux 专有的 bubblewrap(bwrap)沙箱与 user namespace;DSH 在 macOS 和 Windows 上使用完全不同的沙箱后端,本插件在这些平台会直接拒绝加载。已在 Fedora 44(WSL2)实测,详见文末「支持范围」。
+为 workspace-write 受限命令把 uv/pip/npm/Go 的缓存与运行时目录重定向进项目内，解决沙箱内默认缓存位置不可写导致的工具失败，无需逐条命令加缓存前缀。**本版是可插拔架构：增强只存在于本 bundle 的补丁层；停用或卸载后，DSH 按其他有效配置层恢复原生沙箱，无需任何手工清理。**
 
 ## 为什么需要它
 
-DSH 的 workspace-write 模式把宿主根文件系统只读映射,只放开当前工作区和本次命令的 /tmp tmpfs。uv 等工具默认把缓存写入 `~/.cache`(位于只读区),命令因此失败:
+DSH 的 workspace-write 模式把宿主根文件系统只读映射，只放开当前工作区和本次命令的 /tmp tmpfs。uv 等工具默认把缓存写入 `~/.cache`（位于只读区），命令因此失败：
 
 ```text
 Failed to initialize cache at .../.cache/uv
 Read-only file system (os error 30)
 ```
 
-本插件让 DSH 在调用 bwrap 时自动注入工具专用目录变量:缓存、Python 运行时与 Go 状态全部落进项目目录。
+本插件让 DSH 在调用 bwrap 时自动注入工具专用目录变量：缓存、Python 运行时与 Go 状态全部落进项目目录。
 
 ## 工作原理
 
 ```text
-DSH bash executor → sandbox.confine(argv, policy)
-  → /usr/bin/python3 -IS <受信 runner> <bwrap profile> -- bash -c <命令>
-  → runner 严格匹配 DSH 0.2.1-alpha.2 的 bwrap 模板,在 -- 前注入九个目录变量
-  → /usr/bin/bwrap(缓存/运行时落进工作区)
+bash / GUI PTY / 其他同服务域消费者
+  → sandbox.confine(payload, policy, signal)
+  → 原生 LocalSandboxProvider 选择后端并生成 argv（bwrap → Landlock 回退）
+  → 选中 bwrap 时，在载荷前的 "--" 处插入九个环境选项；其他后端原样透传
+  → DSH 原有 subprocess/PTY 执行、取消与错误分类
 ```
 
-本 bundle 做两件事(6.2.1 起为**受检 provider** 结构):
+注入的九个变量：
 
-1. **cordis.patch.yml** 停用原生 sandbox 条目并为其附加就绪依赖(若更高配置层把它重新启用,缺少就绪服务会使其无法激活);再插入本包的受检条目。
-2. **受检 provider(index.js + lib/)** 继承 Host 的 `LocalSandboxProvider`,把"先校验、后注册、逐次复查"固化进构造与调用路径:
-   - **注册前**(prepare):平台/UID 门槛;组合树检查(原生行已停用且就绪依赖在位,bash 行完好);python3/bwrap 双路径身份审计(**含 setuid 位**,先于任何版本查询);bwrap ≥ 0.12.0(CVE-2026-87766 修复下限)与 `python3 -IS` 标志;随包 runner 摘要必须等于 `0ef04d1a…579216`;安装链**逐级先审后建**(拒绝 symlink、组/他人可写、非可信所有者);以**暂存+link 排他发布**原子安装 runner(已存在时仅复用同摘要、本人所有、mode 0500、单链接文件,**绝不覆盖**)。
-   - **每次 confine**:复查 runner inode/字节、python/bwrap 身份、实例存活;对 DSH_HOME、DSH 安装、插件包、Python 标准库等 **DUAL 保护树逐跳重走符号链接解析链**,与激活时记录的快照(最终 realpath + 每一跳 link→target)不一致即拒绝;校验本次 mode 与实际会话 root(拒绝 `/`、整个 HOME、含冒号路径,以及与保护集合冲突的工作区布局——保护集合包含解析链上的每个中间链接节点,工作区覆盖其中任一跳即拒绝);委托原生方法生成 argv 后,逐字断言其恰为"固定 runner + 锁定模板 + 原 payload"。
-   - 任何失败抛出结构化 `SandboxUnavailableError`——不返回原始命令、不切换本地 executor、不自动提权重试。
+| 变量 | 项目内相对路径 |
+|---|---|
+| `UV_CACHE_DIR` | `.dsh-cache/uv` |
+| `PIP_CACHE_DIR` | `.dsh-cache/pip` |
+| `npm_config_cache` | `.dsh-cache/npm` |
+| `GOCACHE` | `.dsh-cache/go-build` |
+| `UV_PYTHON_CACHE_DIR` | `.dsh-cache/uv-python` |
+| `UV_PYTHON_INSTALL_DIR` | `.dsh-state/uv/python` |
+| `UV_PYTHON_BIN_DIR` | `.dsh-state/uv/bin` |
+| `GOMODCACHE` | `.dsh-cache/go-mod` |
+| `GOPATH` | `.dsh-state/go` |
 
-任一环节失败,`ctx.sandbox` 根本不会注册:依赖它的受限 bash 执行器不可用,**失败关闭**,而不是退回执行未认证的 runner。runner 本身只做字符串匹配与 exec:不在宿主创建、解析或清理任何缓存目录,不增加挂载;遇到未知 bwrap 模板直接拒绝,不透传为无沙箱命令。
+缓存根取自本次调用的会话工作区根（canonical 路径），与命令 cwd 无关。这些目录由工具在沙箱内自行创建；插件不在宿主提前 mkdir，不新增可写挂载，不修改 Host 的 `process.env`、PATH、HOME 或任何配置。
 
-**失败关闭的边界要分清两类故障**:
+## 状态合同
 
-- **补丁已应用、插件激活失败**(二进制审计不过、runner 摘要不符、组合树被改动等):原生行已被本包补丁停用并挂着就绪依赖,受限命令失败关闭。这是插件代码自身能保证的范围。
-- **整个 bundle 被跳过**(bundle 补丁损坏、DSH peer 版本不兼容、包缺失):本包的补丁根本没有应用,插件代码也不会运行,原生行会恢复原样。要让这种情形同样失败关闭,必须把同一行"停用原生 + 就绪依赖"写进 **profile 用户补丁层**(`~/.dsh/profiles/<profile>/cordis.patch.yml`)——该层由 DSH 组合器独立加载,不依赖任何 bundle。随包提供现成片段 `patches/profile-fail-closed.patch.yml`,用法见安装步骤。未应用该片段时,DSH 升级导致的 peer 不兼容会让 bundle 被跳过并**静默回退到原生后端**(bwrap 隔离仍在,但缓存重定向与上述审计全部失效),这不是失败关闭。
+| 状态 | 行为 |
+|---|---|
+| 未安装 / 停用 / 已卸载 / 整包被 DSH 跳过 | 本插件配置层退出；恢复其他配置决定的原生 provider；不残留任何就绪依赖或补丁 |
+| Linux + workspace-write + 原生选择 bwrap + 布局合格 | 自动注入完整九变量，原生挂载与载荷原样保留 |
+| Linux + workspace-write + 原生选择 Landlock | 原生结果原样返回；每个 provider 实例对该降级明确告警一次；**不宣称缓存重定向已启用**（uv 等命令仍可能因默认缓存不可写而失败） |
+| read-only | 原生结果原样返回，不注入，也不报增强失效告警 |
+| danger-full-access | 正常由 DSH 消费者绕过 confine；直接低层调用本 provider 传入此 mode 会被拒绝 |
+| 未知 mode、危险工作区、原生返回结构不兼容、实例已撤销 | 本次调用明确失败（失败关闭），不返回原始 argv，不切换无沙箱执行 |
+| bwrap 与 Landlock 均不可用 | 原生 SandboxUnavailableError 原样抛出 |
+| 配置字段错误或预期布局无法解析 | provider 保留注册；Linux workspace-write 按调用拒绝并给出修复路径；read-only 不受这些增强错误影响 |
+| 工作区根含冒号（如 `/data/proj:ect`） | 布局检查仍生效；因 Unix GOPATH 冒号分隔语法无法表达，**整组增强跳过**、原生隔离保持、按实例告警一次（与 6.x 直接拒绝该工作区不同） |
 
-provider 行的 config 是严格的:仅接受可选正整数 `probeTimeoutMs` 与可选绝对目录数组 `additionalProtectedRoots`(只能扩大保护集合);`runnerCommand` 等字段一律拒绝——任何配置层都不能把 runner 指向别处。
+## 能力边界（相对 6.x 的有意收缩）
 
-## 注入的九个目录
+- **不校验 bwrap 二进制身份。** 本版沿用 DSH 原生 PATH 解析与功能探针；旧版对 bwrap/python 的属主、setuid/setgid、可写位与整条执行信任链的审计保证**不再保留**。Host 启动环境、安装件与 PATH 必须受信。
+- **环境可见性收缩。** 插件只能枚举调用时 Host `process.env` 中已存在的规范键及大小写别名（别名在沙箱内 unset 后以规范键设置工作区值）。仅由 `spec.env`/`spec.dshEnv` 新增、Host 从未见过的大小写别名无法被枚举，仍可能进入沙箱并影响工具配置；这类自定义调用的完整重定向不作保证。规范键本身无论是否在 Host 环境中都会被设为工作区值（bwrap 在沙箱启动前执行 argv 中的环境选项，原生环境清洗不会撤销仍保留在 argv 中的选项）。
+- 不再包含外置 Python runner、安装器、runner 摘要校验与 profile 层失败关闭补丁。
+- 非 Linux 平台不承诺缓存增强：加载本包时按原生 provider 透传，并提示不支持。
 
-| 变量 | 工作区下相对路径 | 用途 |
-|---|---|---|
-| UV_CACHE_DIR | .dsh-cache/uv | uv 依赖缓存 |
-| PIP_CACHE_DIR | .dsh-cache/pip | pip 下载/构建缓存 |
-| npm_config_cache | .dsh-cache/npm | npm/npx 缓存及日志 |
-| GOCACHE | .dsh-cache/go-build | Go 构建缓存 |
-| UV_PYTHON_CACHE_DIR | .dsh-cache/uv-python | managed Python 归档缓存 |
-| UV_PYTHON_INSTALL_DIR | .dsh-state/uv/python | 已安装 Python 解释器(持久运行时) |
-| UV_PYTHON_BIN_DIR | .dsh-state/uv/bin | managed Python 入口链接 |
-| GOMODCACHE | .dsh-cache/go-mod | Go 模块及 sumdb 缓存 |
-| GOPATH | .dsh-state/go | sumdb checkpoint 等 Go 状态 |
+保留的防护：一次性只读部署布局采集（HOME、DSH_HOME、Host/插件/Node 路径与 PATH 上的 bwrap 候选）把 Host 代码与配置域记为保护树/保护节点，工作区根与之双向重叠或覆盖时按调用拒绝。该项只防止工作区覆盖 Host 依赖，**不能替代**已删除的二进制身份审计。
 
-这些目录由工具在沙箱内自行创建,无需提前在宿主创建。`read-only` 模式原样透传不注入;`danger-full-access` 不经过 runner。
+## 配置
 
-请在项目的 `.gitignore`、`.dockerignore`、打包与备份规则中排除 `.dsh-cache/` 与 `.dsh-state/`:
+本行仅支持两个字段：
 
-```gitignore
-.dsh-cache/
-.dsh-state/
-```
+- `probeTimeoutMs`：正整数。显式值优先；未配置时继承同树原生 sandbox 行配置中的普通正整数值；两者皆无则使用已核对 SDK 默认值（5000）。
+- `additionalProtectedRoots`：可解析的绝对目录数组。每个条目按保护树处理（拒绝工作区等于它、位于其内部或覆盖它），始终与内置保护集合**合并**（只能扩大、不能缩小），不产生额外可写挂载。
 
-## 安装与卸载
+**有效类型与取值要求以本节业务校验合同为准；`--dump-config-schema` 与管理器配置界面显示的是宽接收层（any），不作为业务类型依据，any 不表示什么值都能执行。**
 
-### 方式一:dsh 命令一键安装(推荐)
+错误处理：未知字段、无效 `probeTimeoutMs`、非数组/相对路径/不存在/非目录/无法解析的 `additionalProtectedRoots` 条目，以及预期布局采集失败，都会记录为配置/布局错误状态（日志标签 `CACHE_REDIRECT_CONFIG` / `CACHE_REDIRECT_LAYOUT`，标明条目、字段、下标与原因）。此时 provider 仍注册，read-only 调用不受影响，Linux workspace-write 调用被精确拒绝并提示修复路径：**修正本行配置/目录后重载或重启，或停用本 bundle 恢复原生**。修正配置后重载（重建实例）即恢复。
 
-```bash
-dsh plugin --profile <你的 profile 名> add github:Siphon2673/dsh-sandbox-cache-redirect
-```
+## 启用、停用、卸载与恢复
 
-该命令把本仓库作为 git 依赖装入指定 profile 并注册 bundle;本包没有构建脚本,不需要 pnpm 的 allowBuilds 豁免。
+- **有管理器界面（web）**：用 DSH bundle 开关停用/启用；按返回的 `applied` / `restart-required` 生效（restart-required 需重启）。停用后原生沙箱即恢复，无需编辑任何 YAML。
+- **卸载**：`dsh plugin --profile <p> remove dsh-sandbox-cache-redirect`。依赖与选择由管理器一并撤销。
+- **无 GUI 的 profile（如 headless）**：停止该 profile 的 Host 并备份后，可用包内离线选择脚本切换启用状态（只改 bundle 选择，不删依赖、不改 YAML）：
+  ```bash
+  node ~/.dsh/profiles/<p>/node_modules/dsh-sandbox-cache-redirect/tools/bundle-selection.mjs \
+    "$(command -v dsh)" ~/.dsh/profiles/<p> disable   # 重新启用: enable
+  ```
+  脚本尊重该 profile 已有的精确版本豁免，不自动授予或修改豁免。保存选择后重启该 profile 并用 `--dump-config` 核对。
+- **构造/导入失败的恢复**：管理平面可用时用管理器停用本 bundle；不可用时停止 Host 后用上述离线脚本撤销选择，再启动即为原生配置。不需要手工删除 YAML。
 
-### 方式二:手动打包安装
-
-```bash
-git clone https://github.com/Siphon2673/dsh-sandbox-cache-redirect.git
-cd dsh-sandbox-cache-redirect
-npm pack           # 生成 dsh-sandbox-cache-redirect-<版本>.tgz
-```
-
-然后在 DSH 插件管理器中安装生成的 tgz;也可以直接从 GitHub Release 页面下载已打好的包(由 tag 触发的 release 工作流自动产出)。
-
-两种方式都以拷贝形式落入 profile 的 node_modules,不链接源码目录。
-
-### 第三步(要求完整失败关闭保证时为必需):应用 profile 层失败关闭补丁
-
-bundle 自带的补丁只在 bundle 整体加载成功时才应用。要覆盖"整个 bundle 被跳过"的情形(补丁损坏、peer 不兼容、包缺失),必须把随包片段合入每个已安装 profile 的用户补丁层。**仅安装 bundle 而不应用本层时,整包跳过会静默回退到原生后端(见「工作原理」末尾的两类故障区分)——若部署要求该情形同样失败关闭,此步骤不可省略。**
-
-合入方法(不要盲目 `>>` 追加:先备份,合入后做解析核验):
-
-```bash
-# 1) 备份现有用户补丁层
-cp ~/.dsh/profiles/<profile 名>/cordis.patch.yml ~/cordis.patch.yml.bak.$(date +%s)
-# 2) 查看随包片段(位于该 profile 的 node_modules 下;请使用此绝对路径,不要依赖当前目录)
-cat ~/.dsh/profiles/<profile 名>/node_modules/dsh-sandbox-cache-redirect/patches/profile-fail-closed.patch.yml
-# 3) 把片段末尾的 "- id: sandbox" 条目合入上述 cordis.patch.yml 的顶层数组:
-#    - 文件内容为空列表 `[]` 时,替换为仅含该条目的数组;
-#    - 已有条目时,在数组末尾新增该条目(缩进与既有条目一致);
-#    - 若已存在对 sandbox 行的旧 runnerCommand 覆盖条目,先删除它(那是历史方案的回退源)。
-# 4) 解析核验:应看到原生行 disabled 且带 sandboxCacheRedirectGuardReady 依赖
-dsh --profile <profile 名> --dump-config | grep -A4 "id: sandbox"
-```
-
-重启 profile 后生效。应用后,即使 bundle 被整体跳过,原生 sandbox 行仍保持停用,受限命令失败关闭。
-
-卸载/回退(按 profile 核对实际结果,不要笼统假设"恢复内置 bwrap"):
-
-- **临时停用**:在插件管理器中禁用本 bundle。
-  - 已应用 profile 层失败关闭补丁的 profile:原生行保持停用,受限命令**失败关闭**(没有可用沙箱),这是预期行为;
-  - 未应用该补丁的 profile:原生行恢复启用。注意该行可能被该 profile 的用户补丁层覆盖过 `runnerCommand`(例如历史 V3 方案的覆盖)——此时回退到的是那个覆盖指定的 runner,而不是内置默认 bwrap。回退前请检查 `~/.dsh/profiles/<profile 名>/cordis.patch.yml`,先清理不再信任的旧覆盖。
-- **彻底移除**:移除 bundle,并删除上述 profile 补丁条目;原生行恢复为内置 bwrap。`.dsh-state` 中的 Python 解释器可能被项目 venv 引用,请用 uv 自身命令处理,不要直接删除。回退后请用一条受限命令实测确认后端符合预期。
-
-## 验收工具
-
-`tools/` 附带两个独立复验工具(仅用 Python 标准库):
-
-```bash
-# 独立 smoke:在宿主直接执行,--parent 用工作区与 /tmp 之外的私有目录
-/usr/bin/python3 -IS tools/smoke-v6.py \
-  --wrapper "$HOME/.local/libexec/dsh/dsh-bwrap-redirect-v6-0ef04d1a72ad" \
-  --parent "$HOME/<私有目录>"
-```
-
-smoke 覆盖:九变量注入、宿主可写对照、明确的 EROFS、工作区落盘、/tmp 不回写宿主、read-only 透传/拒写、未知 profile 拒绝执行。
-
-`tools/session-check-v6.py` 用于端到端会话验收:把它复制到私有目录后,在一个全新的 workspace-write 会话中让 agent 通过 bash 工具原样执行(参数含一次性 token 与宿主哨兵路径),它会校验九个变量的取值、工作区写能力和工作区外的 EROFS 拒绝。
-
-## 升级
-
-升级 DSH/bwrap 或更换 runner 时:重新核对 bwrap profile 模板 → 用**新的版本化文件名**与摘要更新本包(`lib/peers.js` 的 `RUNNER_SHA256`、`RUNNER_FILE_NAME`、`PINNED_VERSIONS`,以及 `runner/` 源文件)→ 重跑测试与 smoke 验收 → 重新 `npm pack` 并安装。不要覆盖正在使用的 runner 文件。
-
-runner 对 DSH 的 bwrap 模板做严格匹配,插件入口也把 DSH/sandbox 相关包版本钉死在 `0.2.1-alpha.2`:DSH 升级后本插件会**拒绝加载**。此时若已应用 profile 层失败关闭补丁,原生行保持停用、受限命令失败关闭;若未应用,整个 bundle 被跳过会静默回退到原生后端——按上述流程重验后再放行新版,不要在这种回退状态下继续跑受限命令。
+注意：已经启动的进程、后台任务与 PTY 保留创建时的环境与隔离；停用不会逆向修改它们。需要完全切换时，正常结束旧任务并关闭/重建持久终端。
 
 ## 支持范围
 
-- 平台:仅 Linux(已在 Fedora 44 WSL2 实测:bwrap 0.12.0、Python 3.14、uv 0.13、Go 1.26)。macOS/Windows 不在支持范围——这两个平台的 sandbox 使用各自后端,本包会直接拒绝加载。
-- DSH:严格锁定 0.2.1-alpha.2(bwrap 模板由 runner 逐字匹配,版本由插件入口钉死;其他版本一律拒绝加载)。
-- uv 需 ≥ 0.7.0(`UV_PYTHON_CACHE_DIR` 自该版本引入);Go 限 module 模式;工作区路径不接受冒号。
-- 不把整个 HOME 或 `/` 当作工作区;runner、DSH_HOME、DSH 安装、插件包、Python 标准库等保护树内不能开项目(每次 confine 逐次检查)。
-- 启动目录自由:可以从 `~` 等任意目录启动 `dsh web`;启动 cwd 只是部署默认根,不安全时插件仅记录警告,不影响启动。逐次硬检查针对每个会话的实际工作区根——若把 HOME、`/` 或保护树选作会话工作区,该会话的受限命令会被逐条拒绝并提示改选项目子目录;read-only 会话不受影响。
+- 平台：Linux（本版增强仅在 Linux + workspace-write + bwrap 链路上生效）。
+- 已验证环境：Fedora 44（WSL2）、DSH 0.2.1-alpha.2、Node 24、bwrap 0.12.0；npm 形态的 DSH CLI/Host。打包 Electron、其他启动器与远程执行器未验证。
+- peer 声明保持保守：仅声明已实际验证的版本；DSH 升级后须按兼容流程重新验收再扩大范围。运行时不再做固定版本字符串判等，改为按调用的结构契约（载荷尾部、selectedRunner 形状、元数据），不兼容时按调用失败关闭。
+- GOPATH 为源码模式的项目、依赖宿主自定义 GOPATH 的项目不承诺兼容；插件不设置 GOSUMDB=off，不修改 GOPROXY/GOTOOLCHAIN/GOFLAGS。
 
-## 许可证
+## 项目侧提示：.gitignore
 
-[MIT](LICENSE)
+如果你在某个 Git 项目中使用本插件，请在该项目根的 `.gitignore` 中保留原有规则并追加：
+
+```gitignore
+/.dsh-cache/
+/.dsh-state/
+```
+
+缓存与本机下载的运行时不宜提交到项目仓库；`.dsh-state` 中的 Python 还可能被现有 venv 引用。忽略规则不会取消已跟踪文件，此类情况按项目自身流程处理。插件不会自动改写 `.gitignore`、不执行 `git rm`；停用或卸载时也不删除这些运行时目录。
+
+## 从 6.x 迁移
+
+6.x 的旧方案包含外置 runner 与 profile 层失败关闭补丁，卸载后原生沙箱不会自动恢复。迁移到 7.x 必须按顺序执行：停止相关 Host → 经 `dsh plugin remove` 卸载旧包 → 从各 profile 的 `cordis.patch.yml` 中精确移除旧门禁条目（`id: sandbox` 且带 `sandboxCacheRedirectGuardReady` 注入的那一条，保留用户其他设置）→ 删除旧专用 runner（`~/.local/libexec/dsh/dsh-bwrap-redirect-v6-*`；`~/.local/bin/dsh-bwrap-redirect` 这类 V3 历史文件按引用情况另行处理）→ 启动 Host 验证原生基线（受限 bash 可用、隔离保持）→ 再安装 7.x。详细步骤与验收顺序见施工方案第 10 节。
+
+## 验收
+
+交付包含同版可运行验收脚本：`tools/session-check.py`（真实受限会话内运行：九变量、工作区写入、工作区外哨兵拒写、后端挂载证据与 token 标记；`--expect native` 用于原生基线验收）与 `tools/bundle-selection.mjs`（无 GUI profile 的离线启停）。测试套件：`node --test tests/*.test.mjs`（需本机安装 DSH CLI，或用 `DSH_CLI=/path/to/dsh` 指定锚点）。
+
+许可：MIT。

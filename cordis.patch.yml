@@ -1,22 +1,25 @@
-# dsh-sandbox-cache-redirect — V6.2 sandbox cache/runtime redirection,
-# guarded-provider form.
+# dsh-sandbox-cache-redirect — V7 pluggable cache/runtime redirection.
 #
-# Row 1 retires the native sandbox provider inside this composition: it is
-# disabled, and it additionally requires the guard-ready service, so a higher
-# patch layer that re-enables it still cannot activate while the guarded
-# provider is unhealthy (fail closed instead of running an uncertified
-# runner). The `name` field only asserts the existing plugin name.
+# Row 1 disables the native sandbox provider ONLY while this bundle takes
+# part in the composition: the override lives in this bundle's own patch
+# layer, so removing/disabling the bundle (or DSH skipping it) removes the
+# override and the native provider returns as the other layers decide. The
+# `name` field only asserts the existing plugin name. No guard-ready inject
+# and no profile/home patch exists anymore (6.x fail-closed contract
+# revoked: a whole-bundle skip restores the native provider, and DSH
+# reports the load problem).
 #
-# Row 2 inserts the guarded provider. Its class verifies everything (runner
-# digest, install chain, binaries, composition) BEFORE registering
-# ctx.sandbox, then re-verifies on every confined call. Row config is strict:
-# only optional probeTimeoutMs / additionalProtectedRoots are accepted; the
-# runner command is fixed inside the provider and is not configurable.
+# Row 2 inserts the cache-redirect provider: a LocalSandboxProvider
+# subclass that keeps the native backend chain (bwrap → Landlock) and
+# injects the nine cache/runtime environment options into the native bwrap
+# argv for Linux workspace-write calls. Effective row config (business
+# contract, validated after a wide receiving schema): optional
+# probeTimeoutMs (positive integer) and additionalProtectedRoots
+# (resolvable absolute directory array); anything else is recorded as a
+# config error and refuses Linux workspace-write calls only.
 - id: sandbox
   name: '@deepseek-ai/dsh-sandbox-local'
   disabled: true
-  inject:
-    sandboxCacheRedirectGuardReady: {}
 - insert:
     - id: sandbox-cache-redirect
       name: dsh-sandbox-cache-redirect

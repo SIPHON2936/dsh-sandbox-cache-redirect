@@ -14,9 +14,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify pinned runner digest before packing
+      - name: Verify pinned tool digests before packing
         run: |
-          echo "0ef04d1a72ad9aa31a00e212246e8fb6765ed1948b74c654af8ce5e99b579216  runner/dsh-bwrap-redirect" | sha256sum --check -
+          set -euo pipefail
+          cat > /tmp/pinned.sha256 <<'EOF'
+          f54fd344dc6ffa7324c73a4eb64b7ac8f8d2752e2c9d8bc55beff95bd59a5c5c  tools/session-check.py
+          4345c0772152e0634ad72af5fc16b7cb0797324c0d6328c944d448acbce77792  tools/bundle-selection.mjs
+          EOF
+          sha256sum --check /tmp/pinned.sha256
 
       - name: npm pack and create the release
         env:

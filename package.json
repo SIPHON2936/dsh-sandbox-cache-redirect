@@ -1,6 +1,6 @@
 {
   "name": "dsh-sandbox-cache-redirect",
-  "version": "6.3.1",
+  "version": "7.0.0-rc.1",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -16,7 +16,7 @@
     "uv",
     "cache"
   ],
-  "description": "Guarded sandbox provider that pins a digest-verified bwrap runner, redirecting uv/pip/npm/Go caches and runtimes into the workspace for sandboxed commands (V6.2 scheme). Linux only.",
+  "description": "Pluggable cache redirect for the native local sandbox provider: injects nine uv/pip/npm/Go cache/runtime environment options into the native bwrap argv for Linux workspace-write calls. No external runner; disabling or uninstalling restores the native provider. Linux enhancement only.",
   "exports": {
     ".": "./index.js",
     "./locale/*.json": "./locale/*.json",
@@ -27,9 +27,8 @@
     "index.js",
     "lib/*.js",
     "cordis.patch.yml",
-    "patches/*.yml",
-    "runner/dsh-bwrap-redirect",
-    "tools/*.py",
+    "tools/session-check.py",
+    "tools/bundle-selection.mjs",
     "tests/*.mjs",
     "locale/*.json",
     "icon.svg",

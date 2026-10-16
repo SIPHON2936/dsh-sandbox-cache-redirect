@@ -2,10 +2,9 @@
 
 [中文](README.md) | English
 
-A bundle plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH). Once installed, bash commands confined under `workspace-write` automatically write their uv/pip/npm/Go caches and runtimes into the current project — no per-command cache prefixes, no prompt-level reminders.
+A bundle plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH), V7 pluggable scheme, Linux.
 
-> [!IMPORTANT]
-> **Linux only.** This plugin relies on Linux-specific bubblewrap (bwrap) confinement and user namespaces. DSH on macOS and Windows uses entirely different sandbox backends, and this package refuses to load there. Tested on Fedora 44 (WSL2); see "Supported scope" at the bottom.
+It redirects the uv/pip/npm/Go cache and runtime directories of `workspace-write` confined commands into the project, fixing tool failures caused by unwritable default cache locations inside the sandbox — no per-command cache prefixes. **This version is pluggable: the enhancement lives only in this bundle's own patch layer. Disabling or uninstalling restores the native sandbox as the other effective configuration layers decide — no manual cleanup.**
 
 ## Why
 
@@ -16,143 +15,109 @@ Failed to initialize cache at .../.cache/uv
 Read-only file system (os error 30)
 ```
 
-This plugin makes DSH inject tool-specific directory variables whenever it invokes bwrap, so caches, Python runtimes, and Go state all land inside the project.
+This plugin makes DSH inject tool-specific directory variables when it invokes bwrap: caches, Python runtimes, and Go state all land inside the project.
 
 ## How it works
 
 ```text
-DSH bash executor → sandbox.confine(argv, policy)
-  → /usr/bin/python3 -IS <trusted runner> <bwrap profile> -- bash -c <command>
-  → runner strictly matches the DSH 0.2.1-alpha.2 bwrap templates and injects
-    nine directory variables before the --
-  → /usr/bin/bwrap (caches/runtimes land in the workspace)
+bash / GUI PTY / other same-realm consumers
+  → sandbox.confine(payload, policy, signal)
+  → the native LocalSandboxProvider selects the backend and builds the argv
+    (bwrap, with Landlock fallback)
+  → when bwrap is selected, nine environment options are inserted at the
+    "--" before the payload; other backends pass through unchanged
+  → DSH's original subprocess/PTY execution, cancellation, and error
+    classification
 ```
 
-The bundle does two things (a **guarded provider** structure since 6.2.1):
+The nine injected variables:
 
-1. **cordis.patch.yml** disables the native `sandbox` entry and attaches a readiness dependency to it (so a higher patch layer that re-enables it still cannot activate while the guarded provider is unhealthy); it then inserts this package's guarded entry.
-2. **The guarded provider (index.js + lib/)** subclasses the Host's own `LocalSandboxProvider` and bakes "verify before registering, re-verify on every call" into its construction and call paths:
-   - **Before registering** (prepare): platform/UID gates; composition checks (native row disabled with its inject blocker in place, bash row intact); dual-path identity audits of python3/bwrap (**including the setuid bit**, before any version query); bwrap ≥ 0.12.0 (the CVE-2026-87766 fix floor) and `python3 -IS` flags; the bundled runner's digest must equal `0ef04d1a…579216`; the install chain is **audited level by level before anything is created** (symlinks, group/other-writable or untrusted-owned directories refused); the runner is **atomically published** via staging + exclusive `link()` (an existing file is reused only if it is a same-digest, user-owned, mode-0500, single-link regular file — **never overwritten**).
-   - **On every confine**: re-checks the runner's inode/bytes, python/bwrap identity, and instance liveness; **re-walks the symlink resolution chain of every DUAL protected tree** (DSH_HOME, the DSH installation, this plugin package, the Python stdlib) hop by hop and refuses on any drift from the activation snapshot (final realpath plus each link→target hop); validates the call's mode and the actual session root (refusing `/`, all of HOME, colon-bearing paths, and any workspace layout overlapping the **protected sets** — which include every intermediate symlink node of those resolution chains, so a workspace covering any hop is refused); after delegating argv generation to the native method, it asserts byte-for-byte that the result is exactly "pinned runner + locked template + original payload".
-   - Every failure raises a structured `SandboxUnavailableError` — never returns the raw command, never swaps in a local executor, never retries with more privilege.
+| Variable | Project-relative path |
+|---|---|
+| `UV_CACHE_DIR` | `.dsh-cache/uv` |
+| `PIP_CACHE_DIR` | `.dsh-cache/pip` |
+| `npm_config_cache` | `.dsh-cache/npm` |
+| `GOCACHE` | `.dsh-cache/go-build` |
+| `UV_PYTHON_CACHE_DIR` | `.dsh-cache/uv-python` |
+| `UV_PYTHON_INSTALL_DIR` | `.dsh-state/uv/python` |
+| `UV_PYTHON_BIN_DIR` | `.dsh-state/uv/bin` |
+| `GOMODCACHE` | `.dsh-cache/go-mod` |
+| `GOPATH` | `.dsh-state/go` |
 
-If any stage fails, `ctx.sandbox` is never registered: the confined bash executor that requires it stays unavailable and **fails closed** instead of falling back to an uncertified runner.
+The cache root comes from the current call's session workspace root (canonical path), not the command cwd. The tools create these directories themselves inside the sandbox; the plugin never pre-creates anything on the host, adds no writable mounts, and never touches the Host's `process.env`, PATH, HOME, or any configuration.
 
-**Two failure classes, and where fail-closed holds:**
+## State contract
 
-- **Patch applied, activation failed** (binary audit, runner digest, composition mismatch, …): the native row is already disabled by this bundle's patch and carries the readiness dependency, so confined commands fail closed. This is what the plugin code itself can guarantee.
-- **The whole bundle is skipped** (corrupt bundle patch, incompatible DSH peer versions, missing package): this bundle's patch never applies and its code never runs, so the native row comes back as-is. To fail closed in that class too, the same "disable native + readiness dependency" row must live in the **per-profile user patch layer** (`~/.dsh/profiles/<profile>/cordis.patch.yml`), which DSH's composer loads independently of any bundle. The package ships a ready-made snippet at `patches/profile-fail-closed.patch.yml`; see the install steps. Without it, a peer incompatibility introduced by a DSH upgrade silently falls back to the native backend (bwrap confinement remains, but cache redirection and every audit above are gone) — that is not fail-closed.
+| State | Behavior |
+|---|---|
+| Not installed / disabled / uninstalled / bundle skipped by DSH | The plugin's configuration layer exits; the native provider returns as the other layers decide; no readiness dependency or patch remains |
+| Linux + workspace-write + native bwrap + valid layout | Full nine-variable injection; native mounts and payload preserved |
+| Linux + workspace-write + native Landlock | Native result returned as-is; one explicit downgrade warning per provider instance; **cache redirection is not claimed active** (uv and friends may still fail on unwritable default caches) |
+| read-only | Native result returned as-is; no injection, no spurious enhancement warnings |
+| danger-full-access | DSH consumers bypass confine as usual; a direct low-level call to this provider with that mode is refused |
+| Unknown mode, dangerous workspace, incompatible native return shape, revoked instance | The current call fails closed — the original argv is never returned, nothing runs unsandboxed |
+| Both bwrap and Landlock unavailable | The native SandboxUnavailableError propagates |
+| Config field errors or unresolvable expected layout | The provider still registers; Linux workspace-write calls are refused with a remediation path; read-only calls are unaffected |
+| Workspace root containing a colon (e.g. `/data/proj:ect`) | Layout checks still apply; because a colon cannot be expressed in the Unix GOPATH list syntax, the **whole enhancement is skipped**, native confinement stands, one warning per instance (unlike 6.x, which refused such workspaces outright) |
 
-The runner itself only matches strings and execs: it creates, resolves, or cleans no cache directories on the host and adds no mounts; unknown bwrap profiles are rejected outright, never passed through as unsandboxed commands.
+## Capability boundaries (intentional reductions vs 6.x)
 
-The provider row's config is strict: only an optional positive-integer `probeTimeoutMs` and an optional absolute-directory array `additionalProtectedRoots` (which can only widen the protected sets) are accepted; `runnerCommand` and every other field is rejected — no configuration layer can point the runner elsewhere.
+- **No bwrap binary identity verification.** This version reuses DSH's native PATH resolution and functional probes; the old audits of bwrap/python ownership, setuid/setgid bits, writable bits, and the whole execution trust chain are **not retained**. The Host launch environment, installation, and PATH must be trusted.
+- **Environment visibility reduction.** The plugin can only enumerate canonical keys and case aliases present in the Host's `process.env` at call time (aliases are unset inside the sandbox before the canonical key is set to the workspace value). Aliases introduced solely via `spec.env`/`spec.dshEnv`, never seen by the Host, cannot be enumerated and may still enter the sandbox and affect tool configuration; complete redirection for such customized calls is not guaranteed. Canonical keys themselves are always set to workspace values (bwrap applies the argv environment options before the sandboxed process starts, and the native environment scrubbing does not revoke options carried in argv).
+- No external Python runner, no installer, no runner digest pinning, and no profile-layer fail-closed patch anymore.
+- Non-Linux platforms: no cache redirection promised; when this package loads there, native provider results pass through and the unsupported platform is reported.
 
-## The nine redirected directories
+Retained protection: a one-time read-only deployment layout collection (HOME, DSH_HOME, the actual Host/plugin/Node paths, and bwrap candidates on PATH) records the Host code and configuration domains as protection trees/nodes; a workspace root overlapping them in either direction, or covering them, is refused per call. This only prevents a workspace from covering Host dependencies — it does **not** replace the removed binary identity audits.
 
-| Variable | Path under the workspace | Purpose |
-|---|---|---|
-| UV_CACHE_DIR | .dsh-cache/uv | uv dependency cache |
-| PIP_CACHE_DIR | .dsh-cache/pip | pip download/build cache |
-| npm_config_cache | .dsh-cache/npm | npm/npx cache and logs |
-| GOCACHE | .dsh-cache/go-build | Go build cache |
-| UV_PYTHON_CACHE_DIR | .dsh-cache/uv-python | managed Python archive cache |
-| UV_PYTHON_INSTALL_DIR | .dsh-state/uv/python | installed Python interpreters (persistent runtime) |
-| UV_PYTHON_BIN_DIR | .dsh-state/uv/bin | managed Python entry links |
-| GOMODCACHE | .dsh-cache/go-mod | Go modules and sumdb cache |
-| GOPATH | .dsh-state/go | sumdb checkpoints and other Go state |
+## Configuration
 
-The tools create these directories inside the sandbox themselves; nothing needs to be pre-created on the host. `read-only` mode passes the variables through without injection; `danger-full-access` bypasses the runner entirely.
+This row supports exactly two fields:
 
-Exclude `.dsh-cache/` and `.dsh-state/` in your project's `.gitignore`, `.dockerignore`, packaging, and backup rules:
+- `probeTimeoutMs`: a positive integer. An explicit value wins; when unset, a plain positive integer from the same-tree native sandbox row's config is inherited; otherwise the verified SDK default (5000) applies.
+- `additionalProtectedRoots`: an array of resolvable absolute directories. Each entry becomes a protection tree (a workspace root equal to it, inside it, or covering it is refused), always **merged** with the built-in protection set (it can only widen, never shrink), and adds no writable mounts.
 
-```gitignore
-.dsh-cache/
-.dsh-state/
-```
+**The effective types and value requirements are governed by the business validation contract in this section; the wide receiving types (any) shown by `--dump-config-schema` and the manager UI are NOT the business type basis — any does not mean any value will run.**
 
-## Install and uninstall
+Error handling: unknown fields, an invalid `probeTimeoutMs`, non-array/relative/missing/non-directory/unresolvable `additionalProtectedRoots` entries, and expected-layout collection failures are all recorded as config/layout error states (log tags `CACHE_REDIRECT_CONFIG` / `CACHE_REDIRECT_LAYOUT`, naming the entry, field, index, and reason). The provider still registers; read-only calls are unaffected; Linux workspace-write calls are precisely refused with the remediation path: **fix this row's config/directories and reload or restart, or disable this bundle to restore the native provider**. Fixing the config and reloading (a rebuilt instance) recovers.
 
-### Option 1: one-command install via dsh (recommended)
+## Enable, disable, uninstall, recovery
 
-```bash
-dsh plugin --profile <your-profile> add github:Siphon2673/dsh-sandbox-cache-redirect
-```
+- **Manager UI (web)**: toggle the bundle; act on the returned `applied` / `restart-required` (the latter needs a restart). The native sandbox returns on disable — no YAML editing.
+- **Uninstall**: `dsh plugin --profile <p> remove dsh-sandbox-cache-redirect`. The dependency and the bundle selection are revoked by the manager together.
+- **Profiles without a GUI (e.g. headless)**: with the profile's Host stopped and a backup made, use the shipped offline selection script (it changes only the bundle selection — no dependencies, no YAML):
+  ```bash
+  node ~/.dsh/profiles/<p>/node_modules/dsh-sandbox-cache-redirect/tools/bundle-selection.mjs \
+    "$(command -v dsh)" ~/.dsh/profiles/<p> disable   # re-enable: enable
+  ```
+  The script respects the profile's existing exact-version exemptions and never grants or edits them. After saving the selection, restart the profile and verify with `--dump-config`.
+- **Recovery from construct/import failure**: when the management plane is available, disable the bundle there; otherwise stop the Host, revoke the selection with the offline script above, and start again — the native configuration is back. No manual YAML deletion.
 
-This installs the repository as a git dependency into the given profile and registers the bundle. The package ships no build scripts, so no pnpm allowBuilds exemption is needed.
-
-### Option 2: pack it yourself
-
-```bash
-git clone https://github.com/Siphon2673/dsh-sandbox-cache-redirect.git
-cd dsh-sandbox-cache-redirect
-npm pack           # produces dsh-sandbox-cache-redirect-<version>.tgz
-```
-
-Then install the tarball in the DSH plugin manager — or download a ready-made tarball from the GitHub Releases page (built automatically by the tag-triggered release workflow).
-
-Either way the bundle is copied into the profile's node_modules, never linked to the source tree.
-
-### Step 3 (REQUIRED for the full fail-closed guarantee): apply the profile-layer fail-closed patch
-
-The bundle's own patch only applies when the whole bundle loads. To also cover "the whole bundle was skipped" (corrupt patch, peer incompatibility, missing package), the shipped snippet must be merged into the user patch layer of every profile where the bundle is installed. **Installing the bundle without this layer leaves a whole-bundle skip silently falling back to the native backend (see the two failure classes in "How it works") — if your deployment requires fail-closed there, this step is not optional.**
-
-How to merge (do NOT blindly append with `>>`: back up first, verify parsing after):
-
-```bash
-# 1) Back up the existing user patch layer
-cp ~/.dsh/profiles/<profile>/cordis.patch.yml ~/cordis.patch.yml.bak.$(date +%s)
-# 2) Read the shipped snippet (absolute path inside the profile's node_modules)
-cat ~/.dsh/profiles/<profile>/node_modules/dsh-sandbox-cache-redirect/patches/profile-fail-closed.patch.yml
-# 3) Merge the snippet's final "- id: sandbox" entry into that cordis.patch.yml's
-#    top-level array:
-#    - if the file is an empty list `[]`, replace it with a list of just this entry;
-#    - otherwise append the entry at the end of the array (matching indentation);
-#    - if an old runnerCommand override for the sandbox row exists, delete it first
-#      (it is a fallback source from historical setups).
-# 4) Verify the parse: the native row should be disabled with the
-#    sandboxCacheRedirectGuardReady requirement
-dsh --profile <profile> --dump-config | grep -A4 "id: sandbox"
-```
-
-Restart the profile afterwards. With this in place, the native sandbox row stays disabled — and confined commands fail closed — even when the bundle is skipped entirely.
-
-Uninstall / roll back (verify per profile; do not assume "falls back to built-in bwrap" universally):
-
-- Temporary: disable the bundle in the plugin manager.
-  - Profiles with the fail-closed patch applied: the native row stays disabled and confined commands **fail closed** (no sandbox available) — that is the intended behavior.
-  - Profiles without it: the native row comes back enabled. Beware that the profile's user patch layer may override its `runnerCommand` (e.g. a leftover override from a historical V3 setup) — the fallback is then that override's runner, not the built-in default bwrap. Check `~/.dsh/profiles/<profile>/cordis.patch.yml` and remove stale overrides before rolling back.
-- Permanent: remove the bundle **and** the profile patch entry above; the native row then returns to built-in bwrap. Python interpreters under `.dsh-state` may still be referenced by project virtualenvs; use uv's own commands to retire them instead of deleting the directory. After any rollback, run one confined command to confirm the backend you actually got.
-
-## Acceptance tools
-
-`tools/` ships two standalone re-verification tools (Python standard library only):
-
-```bash
-# Standalone smoke: run on the host; --parent must be a private directory
-# outside both the workspace and /tmp
-/usr/bin/python3 -IS tools/smoke-v6.py \
-  --wrapper "$HOME/.local/libexec/dsh/dsh-bwrap-redirect-v6-0ef04d1a72ad" \
-  --parent "$HOME/<private-dir>"
-```
-
-The smoke suite covers: nine-variable injection, a host-writable positive control, explicit EROFS, workspace persistence, /tmp not leaking back to the host, read-only passthrough/refusal, and rejection of unknown profiles without executing the payload.
-
-`tools/session-check-v6.py` is for end-to-end session acceptance: copy it to a private location, then have the agent run it verbatim through the bash tool in a fresh workspace-write session (its arguments carry a one-time token and a host sentinel path). It verifies all nine injected values, workspace writability, and EROFS refusal outside the workspace.
-
-## Upgrading
-
-When upgrading DSH/bwrap or replacing the runner: re-check the bwrap profile templates → update this package with a **new versioned file name** and digest (`RUNNER_SHA256`, `RUNNER_FILE_NAME`, and `PINNED_VERSIONS` in `lib/peers.js`, plus the `runner/` source file) → re-run the test suite and smoke acceptance → `npm pack` and reinstall. Never overwrite a runner file that is in use.
-
-The runner strictly matches DSH's bwrap templates, and the plugin entry pins DSH and the sandbox-seam packages to `0.2.1-alpha.2`: after a DSH upgrade this plugin **refuses to load**. With the profile-layer fail-closed patch applied, the native row stays disabled and confined commands fail closed; without it, the skipped bundle silently falls back to the native backend. Re-validate the new version through the procedure above before enabling it — do not keep running confined commands in that fallback state.
+Note: already-started processes, background tasks, and PTYs keep the environment and isolation they were created with; disabling never rewrites them retroactively. To switch completely, finish old tasks normally and close/recreate persistent terminals.
 
 ## Supported scope
 
-- Platform: Linux only (tested on Fedora 44 WSL2 with bwrap 0.12.0, Python 3.14, uv 0.13, Go 1.26). macOS/Windows are unsupported — their sandboxes use their own backends, and this package refuses to load there.
-- DSH: strictly pinned to 0.2.1-alpha.2 (templates matched byte-for-byte by the runner, versions pinned at the plugin entry; any other version refuses to load).
-- uv ≥ 0.7.0 is required (`UV_PYTHON_CACHE_DIR` was introduced in 0.7.0); Go is supported in module mode only; workspace paths containing colons are refused.
-- Never use `/` or all of HOME as a workspace; protected trees (runner, DSH_HOME, the DSH installation, this plugin package, the Python stdlib) cannot host projects — checked on every confine call.
-- Launch-directory freedom: `dsh web` may be started from `~` or anywhere else; the launch cwd is only the deployment default root, and an unsafe one merely logs a warning without blocking startup. The hard per-call checks target each session's actual workspace root — a session rooted at HOME, `/`, or a protected tree has its confined commands refused one by one, with a hint to pick a project subdirectory. Read-only sessions are unaffected.
+- Platform: Linux (the enhancement only applies on the Linux + workspace-write + bwrap path).
+- Verified environment: Fedora 44 (WSL2), DSH 0.2.1-alpha.2, Node 24, bwrap 0.12.0; npm-form DSH CLI/Host. Packaged Electron, other launchers, and remote executors are not verified.
+- The peer range stays conservative: only versions with real acceptance evidence are declared; after a DSH upgrade, re-run compatibility acceptance before widening. Runtime no longer performs fixed version-string equality; per-call structural contracts (payload suffix, selectedRunner shape, metadata) fail the call closed on incompatibility instead.
+- Projects using GOPATH source mode or depending on a host-custom GOPATH are not promised compatibility; the plugin never sets GOSUMDB=off and never modifies GOPROXY/GOTOOLCHAIN/GOFLAGS.
 
-## License
+## For project maintainers: .gitignore
 
-[MIT](LICENSE)
+If you use this plugin in a Git project, keep your existing rules and append to the project root `.gitignore`:
+
+```gitignore
+/.dsh-cache/
+/.dsh-state/
+```
+
+Caches and locally downloaded runtimes should not be committed; the Python under `.dsh-state` may also be referenced by existing venvs. Ignore rules do not untrack already-tracked files — handle those per your project's own process. The plugin never edits `.gitignore` and never runs `git rm`; disabling or uninstalling does not delete these runtime directories.
+
+## Migrating from 6.x
+
+The 6.x scheme shipped an external runner and a profile-layer fail-closed patch, so uninstalling did not restore the native sandbox. Migration to 7.x must follow this order: stop the affected Hosts → uninstall the old package via `dsh plugin remove` → precisely remove the old guard entry from each profile's `cordis.patch.yml` (the `id: sandbox` entry carrying the `sandboxCacheRedirectGuardReady` inject — keep every other user setting) → delete the old dedicated runner (`~/.local/libexec/dsh/dsh-bwrap-redirect-v6-*`; treat V3-era files like `~/.local/bin/dsh-bwrap-redirect` separately by reference) → start the Host and verify the native baseline (confined bash works, isolation holds) → then install 7.x. See section 10 of the construction plan for the full procedure and acceptance ordering.
+
+## Acceptance
+
+The delivery ships same-version acceptance tools: `tools/session-check.py` (run inside a real confined session: nine variables, workspace write, out-of-workspace sentinel denial, backend mount evidence, token marker; `--expect native` for native-baseline acceptance) and `tools/bundle-selection.mjs` (offline enable/disable for GUI-less profiles). Test suite: `node --test tests/*.test.mjs` (needs a DSH CLI installed locally, or set `DSH_CLI=/path/to/dsh`).
+
+License: MIT.

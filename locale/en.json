@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Sandbox Cache Redirect",
-    "description": "Pins a digest-verified bwrap runner so workspace-write sandboxed commands write uv/pip/npm/Go caches and runtimes into the project (.dsh-cache/.dsh-state) — no per-command cache prefixes (V6.2 scheme)."
+    "description": "Writes uv/pip/npm/Go caches and runtimes into the project (.dsh-cache/.dsh-state) for workspace-write sandboxed commands — no per-command cache prefixes. Pluggable: disabling or uninstalling restores the native sandbox (V7 scheme)."
   }
 }
