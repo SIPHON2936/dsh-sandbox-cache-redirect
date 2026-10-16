@@ -22,16 +22,29 @@ jobs:
           sha256sum --check /tmp/pinned.sha256
 
       - name: V7 structural invariants
+        # Scope note: the retired guard service may be mentioned in docs,
+        # tests and these workflows themselves (migration notes, absence
+        # assertions); RUNTIME files must not reference it. Explicit exit
+        # codes — a bare `! grep` does NOT fail a `set -e` step.
         run: |
           set -euo pipefail
-          # No external runner, no fail-closed profile patch, no guard service.
-          ! grep -rq 'sandboxCacheRedirectGuardReady' --exclude-dir=.git .
-          ! grep -q 'runnerCommand' cordis.patch.yml
-          test ! -e runner
-          test ! -e patches
-          test ! -e lib/install.js
-          test ! -e lib/trust.js
-          echo "V7 structural invariants hold"
+          status=0
+          if grep -rn 'sandboxCacheRedirectGuardReady' index.js lib cordis.patch.yml tools locale; then
+            echo "::error::retired guard service referenced by runtime files"
+            status=1
+          fi
+          if grep -q 'runnerCommand' cordis.patch.yml; then
+            echo "::error::cordis.patch.yml carries runnerCommand"
+            status=1
+          fi
+          for artifact in runner patches lib/install.js lib/trust.js; do
+            if [ -e "$artifact" ]; then
+              echo "::error::retired artifact still present: $artifact"
+              status=1
+            fi
+          done
+          if [ "$status" -eq 0 ]; then echo "V7 structural invariants hold"; fi
+          exit "$status"
 
       - name: Syntax-check the plugin sources
         run: |
